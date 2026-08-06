@@ -1,0 +1,12 @@
+/.bundle/
+/Gemfile.lock
+/pkg/
+/spec/dummy/log/*.log
+/spec/dummy/tmp/
+/tmp/
+/doc/
+/.yardoc
+
+# Reference checkouts are working material, not repo content. Each carries its
+# own .git, so committing them would leave dangling gitlinks rather than files.
+/references/
