@@ -1,0 +1,5 @@
+ignore:
+  - 'spec/dummy/db/schema.rb'
+  - 'spec/dummy/bin/**/*'
+  - 'lib/generators/**/templates/**/*'
+  - '**/tmp/*'

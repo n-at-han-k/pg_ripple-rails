@@ -2,9 +2,7 @@ export const meta = {
   name: 'build-pg-ripple-rails',
   description: 'Build the pg_ripple Rails gem, phase by phase, in the shape of fx and pg_cron-rails',
   whenToUse:
-    'Run from the root of pg_ripple-rails with references/fx, references/pg_cron-rails and ' +
-    'references/pg-ripple checked out. Implements the plan in WORKFLOW.md. Pass ' +
-    'args: {phases: [1,2]} to run a subset; omit args to run all eight.',
+    'Run from the root of pg_ripple-rails with references/fx, references/pg_cron-rails and references/pg-ripple checked out. Implements the plan in WORKFLOW.md. Pass args: {phases: [1,2]} to run a subset; omit args to run all nine.',
   phases: [
     { title: 'Probe', detail: 'answer the open questions against a live pg_ripple database' },
     { title: 'Scaffold', detail: 'gemspec, Gemfile, Rakefile, bin/, version, railtie, configuration' },
@@ -49,6 +47,16 @@ NON-NEGOTIABLE:
   - Do not invent pg_ripple SQL functions. If the function you need does not
     appear in sql-functions.md or the extension source, say so in your return
     value rather than calling it.
+  - CONTAINERS: this machine runs other people's containers, including a live
+    pg_ripple one (\`ontology-ripple\`, 127.0.0.1:15432) and a tradeportal stack.
+    Never exec into, stop, restart or remove a container you did not create, and
+    never connect to one — a probe or test run writes and drops schema objects.
+    If you need a database, create your OWN throwaway container from
+    ghcr.io/trickle-labs/pg-ripple:latest with a name unique to your phase,
+    \`--rm\`, an ephemeral published port (\`-p 127.0.0.1:0:5432\`), and no volume
+    or network attachments; remove it before you finish. Never run
+    \`docker system prune\` or any other bulk container/image/volume/network
+    command.
 
 Return a terse report: files written, decisions taken that WORKFLOW.md did not
 already settle, and anything you could not do.
@@ -62,10 +70,38 @@ const PHASES = [
 
 PHASE 1 — Probe. Answer WORKFLOW.md section 7's open questions empirically.
 
-Get a pg_ripple database: check for a running one (\`psql -c "SELECT 1 FROM pg_extension WHERE extname='pg_ripple'"\`),
-otherwise try to build/run the image from references/pg-ripple/docker or Dockerfile.
-If you cannot get one running inside ~10 minutes, STOP and report that — do not
-guess the answers, and do not spend the rest of the phase fighting the build.
+Get a pg_ripple database. The image \`ghcr.io/trickle-labs/pg-ripple:latest\` is
+ALREADY PULLED on this machine — run it rather than building from
+references/pg-ripple/Dockerfile. There is no psql on the host PATH, so drive it
+with \`docker exec <container> psql -U postgres\`. If you cannot get one running
+inside ~10 minutes, STOP and report that — do not guess the answers, and do not
+spend the rest of the phase fighting the build.
+
+CONTAINER ISOLATION — HARD RULES. This machine has other people's containers
+running, INCLUDING a live pg_ripple one called \`ontology-ripple\` on
+127.0.0.1:15432, plus a tradeportal stack. Your probe writes and drops schema
+objects, so touching any of them would destroy real work.
+
+  - NEVER use, exec into, restart, stop or remove a container you did not create.
+    \`ontology-ripple\` is off limits — do not connect to port 15432 at all.
+  - Create exactly ONE container, named \`pg-ripple-rails-probe\`, from that image:
+      docker run -d --rm --name pg-ripple-rails-probe \\
+        -e POSTGRES_PASSWORD=probe -e POSTGRES_DB=probe \\
+        -p 127.0.0.1:0:5432 ghcr.io/trickle-labs/pg-ripple:latest
+    The \`-p 127.0.0.1:0:5432\` asks the kernel for a free ephemeral port — never
+    hardcode a host port, and read the assigned one back with \`docker port\`.
+    Prefer \`docker exec\` over the host port entirely.
+  - No volume mounts, no bind mounts, no --network joining an existing network,
+    no docker compose. The container must own nothing that outlives it.
+  - If the name is already taken, pick \`pg-ripple-rails-probe-2\` etc. Do not
+    remove the existing one.
+  - Remove your container at the end of the phase, pass or fail:
+    \`docker rm -f pg-ripple-rails-probe\`. Do not run \`docker system prune\`,
+    \`docker container prune\`, or any other command that acts on containers,
+    images, volumes or networks in bulk.
+
+Record in your report the exact container name you used and confirmation that
+you removed it.
 
 With a database, determine by experiment:
   a. Is load_shacl() additive or replacing when a shape IRI is redefined?
@@ -305,9 +341,12 @@ for (const p of selected) {
       (report.blocked.length ? `, ${report.blocked.length} BLOCKED` : ''),
   )
 
-  // A blocked probe invalidates the assumptions the rest of the build rests on.
-  if (p.n === 1 && report.blocked.length > 0) {
-    log('Probe phase was blocked. Later phases would be guessing — stopping here.')
+  // Only ONE probe failure invalidates the rest of the build: not getting a
+  // database at all, which would make every later phase guesswork. An upstream
+  // bug the probe found and documented is a RESULT, not a blocker — the first
+  // run stopped the whole build on exactly that, which was wrong.
+  if (p.n === 1 && /^none$/i.test(report.verified.trim())) {
+    log('Probe ran nothing against a live database. Later phases would be guessing — stopping here.')
     break
   }
 }
