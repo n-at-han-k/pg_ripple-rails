@@ -32,4 +32,13 @@ class Person < ApplicationRecord
   graph_has_many :reports, path: +ex.manages, class_name: "Person"
   graph_has_one :manager, path: ~ex.manages, class_name: "Person"
   graph_has_many :colleagues, path: ~ex.worksAt / ex.worksAt, class_name: "Person"
+  graph_has_one :employer, predicate: ex.worksAt, class_name: "Organization"
+
+  # The same traversal, scoped to a named graph, with the graph written as a
+  # `String` — the form `PgRipple.repository(graph_name:)`,
+  # `PgRipple::Query.new` and the README's `c.default_graph` all take. Here
+  # because `graph_includes` used to raise `ArgumentError` for exactly this
+  # while the lazy read worked (`docs/spec-corrections.md` §21).
+  graph_has_many :hr_reports, path: +ex.manages, class_name: "Person",
+    graph_name: "https://app.example.com/graphs/hr"
 end

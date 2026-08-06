@@ -17,4 +17,14 @@ PgRipple.configure do |c|
   # has_many: the query behind a property path is a whole SPARQL evaluation,
   # and a + or * path is unbounded.
   c.strict_loading = Rails.env.local?
+
+  # Reset pg_ripple's SPARQL plan cache on a connection whose transaction
+  # rolled back. Leave this on. pg_ripple 0.128.0 caches the compiled SQL for a
+  # SPARQL query with the dictionary ids of its constants baked in as integers,
+  # and does not invalidate that cache when a transaction aborts — so without
+  # this, one aborted transaction can leave a single pooled connection
+  # answering some queries with zero rows for the rest of its life. It costs
+  # one round trip after a rollback, and only on a connection that has actually
+  # run a pg_ripple statement.
+  c.reset_plan_cache_on_rollback = true
 end

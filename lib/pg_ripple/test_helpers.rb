@@ -3,6 +3,8 @@
 require "active_record"
 require "rdf"
 
+require "pg_ripple"
+
 module PgRipple
   # Small conveniences for a suite that asserts about the graph.
   #
@@ -15,48 +17,58 @@ module PgRipple
   # does not have — `DROP EXTENSION pg_ripple CASCADE` in particular leaves the
   # merge worker panicking in a loop with the dictionary empty.
   #
-  # There is exactly one thing to clean up, and it is not the data:
-  # {.reset_dictionary_cache!}. Call it before each example that touches the
-  # graph, or the second one silently reads nothing. See
-  # `docs/spec-corrections.md` §11.
+  # A rolled-back transaction leaves pg_ripple's SPARQL plan cache holding
+  # plans that can never match a row again ({PgRipple::PlanCache}). The gem
+  # handles that for you — every rollback marks the connection and the next
+  # statement resets the cache — so a transactional suite needs **no** hook of
+  # its own, and the `before(:each)` line earlier versions of this README asked
+  # for is no longer required.
   #
-  #     RSpec.configure do |c|
-  #       c.include PgRipple::TestHelpers
-  #       c.before(:each) { PgRipple::TestHelpers.reset_dictionary_cache! }
-  #     end
+  # {.reset_plan_cache!} is here for the suites the rollback hook cannot see: a
+  # suite that cleans with `TRUNCATE` or `DatabaseCleaner`, one that reaches
+  # the store through SQL that never goes through this gem, or one that has
+  # turned {PgRipple::Configuration#reset_plan_cache_on_rollback} off.
+  #
   module TestHelpers
-    # Drops the connections, and with them pg_ripple's per-backend dictionary
-    # cache.
+    # Clears pg_ripple's SPARQL plan cache on the current connection.
     #
-    # **A rolled-back transaction poisons that cache**, which makes this the
-    # one thing a transactional suite has to do and the reason the README's
-    # "nothing extra to clean up" was wrong. pg_ripple 0.128.0 keeps a
-    # per-backend map of term to dictionary id; a `ROLLBACK` removes the
-    # dictionary rows without invalidating the map. The next transaction on
-    # that connection writes triples against ids that no longer exist, and
-    # every query for those terms returns **nothing** — silently, and only for
-    # the terms the rolled-back example was the first to use, which is what
-    # makes it look like a flaky test rather than a bug. Three rolled-back
-    # rounds of insert-then-query on one connection return 1, 0, 0; with a
-    # reconnect between them, 1, 1, 1. The server will also log
-    # `batch_decode: dictionary entry missing for id …` once it is far enough
-    # gone.
+    # Exactly {PgRipple.reset_plan_cache!} — one round trip, no reaching into
+    # the host application's connection pool. It is safe to call before every
+    # example and unnecessary in a suite that rolls back, because the rollback
+    # already did it.
     #
-    # The cache is per backend and there is no API to clear it, so the fix is
-    # to drop the connection. It costs a few milliseconds and it is the
-    # difference between a repeatable suite and a haunted one.
-    #
-    # This is deliberately not installed as a global hook by
-    # `require "pg_ripple/rspec"`: disconnecting a host application's pool
-    # before every example — including the ones that never touch a database —
-    # is not a decision a gem gets to make silently. Add the line above.
-    #
-    # @return [void]
-    def self.reset_dictionary_cache!
-      ActiveRecord::Base.connection_pool.disconnect!
+    # @return [Boolean] whether the reset ran
+    def self.reset_plan_cache!
+      PgRipple.reset_plan_cache!
     end
 
-    # @return [void]
+    # Deprecated spelling of {.reset_plan_cache!}, kept for one release because
+    # it was published in the README.
+    #
+    # It is not only a rename. The old implementation was
+    # `ActiveRecord::Base.connection_pool.disconnect!`, and it worked by
+    # accident: a new backend gets an empty plan cache. It also stated a
+    # mechanism — a stale *dictionary* cache — that
+    # `docs/probe-cache-invalidation.md` disproves, and it tore down a host
+    # application's whole pool to clear one connection's cache.
+    #
+    # @deprecated Use {.reset_plan_cache!}.
+    # @return [Boolean] whether the reset ran
+    def self.reset_dictionary_cache!
+      warn "[pg_ripple] PgRipple::TestHelpers.reset_dictionary_cache! is deprecated; " \
+        "use PgRipple::TestHelpers.reset_plan_cache! (the cache is the SPARQL plan " \
+        "cache, not the dictionary — see PgRipple::PlanCache)."
+
+      reset_plan_cache!
+    end
+
+    # @return [Boolean] whether the reset ran
+    def ripple_reset_plan_cache!
+      TestHelpers.reset_plan_cache!
+    end
+
+    # @deprecated Use {#ripple_reset_plan_cache!}.
+    # @return [Boolean] whether the reset ran
     def ripple_reset_dictionary_cache!
       TestHelpers.reset_dictionary_cache!
     end

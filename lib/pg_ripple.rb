@@ -9,6 +9,7 @@ require "pg_ripple/version"
 # boot. Adapter before Configuration for the same reason — Configuration
 # instantiates PgRipple::Adapters::Postgres.
 require "pg_ripple/definition"
+require "pg_ripple/plan_cache"
 require "pg_ripple/adapters/postgres"
 require "pg_ripple/configuration"
 
@@ -28,11 +29,14 @@ require "pg_ripple/repository"
 require "pg_ripple/persistence/diff_strategy"
 require "pg_ripple/query"
 require "pg_ripple/relation"
+require "pg_ripple/preloader"
+require "pg_ripple/preloading"
 require "pg_ripple/associations"
 require "pg_ripple/node"
 
 require "pg_ripple/statements"
 require "pg_ripple/command_recorder"
+require "pg_ripple/migration_dsl"
 require "pg_ripple/schema_dumper"
 
 require "pg_ripple/railtie" if defined?(::Rails::Railtie)
@@ -56,14 +60,39 @@ module PgRipple
 
   # Hooks pg_ripple into Rails.
   #
-  # Enables the `*_ripple_*` migration methods, migration reversibility, and
-  # `schema.rb` dumping. Three mix-ins, in F(x)'s order.
+  # Enables the `*_ripple_*` migration methods, the `ripple do … end` block
+  # that gives them their short names, migration reversibility, and `schema.rb`
+  # dumping. F(x)'s three mix-ins, plus ours.
+  #
+  # {PgRipple::MigrationDsl} goes onto `ActiveRecord::Migration` and adds
+  # exactly one name, `ripple`. The short names it exposes are defined on a
+  # receiver of our own and are deliberately NOT on the adapter, where they
+  # would shadow another gem's — see {PgRipple::MigrationDsl}.
   def self.load
     ActiveRecord::Migration::CommandRecorder.include(PgRipple::CommandRecorder)
     ActiveRecord::ConnectionAdapters::AbstractAdapter.include(PgRipple::Statements)
+    ActiveRecord::Migration.include(PgRipple::MigrationDsl)
     ActiveRecord::SchemaDumper.prepend(PgRipple::SchemaDumper)
 
+    install_plan_cache_invalidation
+
     true
+  end
+
+  # Marks a connection whose transaction rolled back, so the next pg_ripple
+  # statement on it resets the stale SPARQL plan cache first.
+  #
+  # Prepended onto `PostgreSQLAdapter` and not onto `AbstractAdapter`, where
+  # the other mix-ins go: `PostgreSQL::DatabaseStatements` defines
+  # `#exec_rollback_db_transaction` itself, so a module prepended to the
+  # abstract class sits below it in the ancestors and is never reached. The
+  # load hook fires immediately if the adapter is already loaded.
+  #
+  # @see PgRipple::PlanCache
+  def self.install_plan_cache_invalidation
+    ActiveSupport.on_load(:active_record_postgresqladapter) do
+      prepend PgRipple::PlanCache::Invalidation
+    end
   end
 
   # @return [PgRipple::Configuration] pg_ripple's current configuration
@@ -153,5 +182,26 @@ module PgRipple
   # Alias of {.database}, for callers that think of it as a connection.
   def self.connection
     configuration.adapter
+  end
+
+  # Clears pg_ripple's SPARQL plan cache on the current connection.
+  #
+  # The gem does this for you after a rollback — see {PgRipple::PlanCache} —
+  # so this is the escape hatch for the cases it cannot see: a suite that
+  # cleans with `TRUNCATE` rather than a transaction, a connection poisoned by
+  # SQL that did not go through this gem, or
+  # {PgRipple::Configuration#reset_plan_cache_on_rollback} turned off.
+  #
+  # Warns once and returns false if the reset fails — which on a database
+  # without the extension it will, because there is then no
+  # `pg_ripple.plan_cache_reset()` to call.
+  #
+  # @return [Boolean] whether the reset ran
+  def self.reset_plan_cache!
+    if ActiveRecord::Base.respond_to?(:with_connection)
+      ActiveRecord::Base.with_connection { |conn| PgRipple::PlanCache.reset!(conn) }
+    else
+      PgRipple::PlanCache.reset!(ActiveRecord::Base.connection)
+    end
   end
 end

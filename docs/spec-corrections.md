@@ -5,9 +5,10 @@ the places where those blocks do not match pg_ripple 0.128.0 as it actually beha
 [`probe-results.md`](probe-results.md) — a live run against `ghcr.io/trickle-labs/pg-ripple`
 reading signatures from `pg_proc` rather than from the upstream docs, which are stale.
 
-Corrections 1–3 and 6–15 are settled: the extension, or the layer already in `lib/`, is the
-authority. 4 and 5 are open decisions. 14 and 15 came from review of the built gem rather than
-from the extension — they are places where the code was wrong and the README described the bug.
+Corrections 1–4 and 6–18 are settled: the extension, or the layer already in `lib/`, is the
+authority. §5 is the one open decision left, and it is open upstream rather than here. 14–17
+came from review of the built gem rather than from the extension — they are places where the
+code was wrong and the README described the bug.
 
 ---
 
@@ -116,7 +117,7 @@ body separator and the trailing ` .`.
 - `list_rules()` and `list_sparql_views()` return a single `jsonb`, while `list_graphs()`,
   `list_shapes()`, `list_rule_sets()` and `list_endpoints()` return tables.
 
-## 4. OPEN: two migration naming schemes
+## 4. SETTLED: `create_ripple_*` on the adapter, the short names inside `ripple do … end`
 
 The spec writes `create_ruleset`, `create_shape`, `create_json_mapping`, `create_tenant`. The
 migration layer already in `lib/` writes `create_ripple_rules`, `create_ripple_shapes`, and so
@@ -128,12 +129,91 @@ must be prefixed or it shadows `fx`'s same-named methods for the entire host app
 `create_shape` is the specific hazard: `fx` has no such method today, but the collision class
 is real and the cost of being wrong is silent breakage in someone else's migrations.
 
-Three ways out, in order of preference:
+Three ways out were on the table:
 
 1. Keep `create_ripple_*` as the mixed-in names and expose the spec's shorter names only
    inside a `ripple do … end` migration block, which is a receiver we own.
 2. Ship the short names and accept the risk, documenting it.
 3. Ship both, with the short ones as aliases — worst option: doubles the collision surface.
+
+**Option 1 is what was built**, in `lib/pg_ripple/migration_dsl.rb`.
+
+`PgRipple::MigrationDsl` is included into `ActiveRecord::Migration` by `PgRipple.load` and adds
+exactly one name, `ripple`. Nothing is added to the adapter. The short names are instance
+methods of `PgRipple::MigrationDsl::Receiver`, whose `STATEMENTS` constant is the whole
+mapping and is what the specs iterate — so a statement added to `lib/` without a short name is
+a one-line change, and a short name that reaches the adapter is a failing example.
+
+| Inside the block | Statement it dispatches to |
+| --- | --- |
+| `create_prefix`, `drop_prefix` | `create_ripple_prefix`, `drop_ripple_prefix` |
+| `create_shape`, `update_shape`, `drop_shape` | `create_ripple_shapes`, `update_ripple_shapes`, `drop_ripple_shapes` |
+| `create_ruleset`, `update_ruleset`, `drop_ruleset`, `disable_ruleset`, `enable_ruleset` | `create_ripple_rules`, … |
+| `create_sparql_view`, `update_sparql_view`, `drop_sparql_view` | `create_ripple_sparql_view`, … |
+| `create_endpoint`, `drop_endpoint` | `create_ripple_endpoint`, `drop_ripple_endpoint` |
+
+Singular `create_shape` and `create_ruleset` where the README is singular, though the
+statements they reach are plural and load a whole document: the file is what the migration
+names. `create_json_mapping`, `create_tenant` and `install_rule_library` are **not** defined —
+nothing in `lib/` implements them, and a name that raises `NoMethodError` inside a block
+implying it works is worse than no name.
+
+Three decisions inside that file, none of them settled by the spec:
+
+- **Dispatch goes through the migration's `execution_strategy`, fetched on every call, not
+  through a connection the receiver holds.** This is what keeps the block reversible: during
+  `db:rollback` Rails swaps a migration's connection for an
+  `ActiveRecord::Migration::CommandRecorder` (`ActiveRecord::Migration#revert`), so a receiver
+  that had captured the adapter at block entry would run the migration *forwards* while Rails
+  believed it was running it backwards. Asking each time means the recorder receives the
+  command, `PgRipple::CommandRecorder` inverts it exactly as for a directly-written
+  `create_ripple_*`, and `revert_to_version:` is untouched. `execution_strategy` rather than
+  `connection` so a host app's `ActiveRecord.migration_strategy` is still honoured, with a
+  fallback to `connection`.
+- **`ActiveRecord::Migration#method_missing` is deliberately bypassed.** It rewrites the first
+  argument of everything it forwards with `proper_table_name`, which is right for
+  `create_table :people` and wrong for `create_shape :person_shape` — in an engine, or any app
+  with `table_name_prefix` set, it would look for a shape set, a rule set or a URL under a
+  table's name. Owning the receiver is what makes skipping it possible. `say_with_time` is
+  called by hand so the log line survives, and it names what the migration wrote
+  (`create_shape(…)`), not the statement underneath.
+- **Anything the receiver does not define is forwarded to the migration**, so `execute`,
+  `reversible`, `say` and the migration's own helpers work inside the block, and the long
+  `create_ripple_*` names remain available there too. A block taking one argument is passed
+  the receiver instead of being `instance_exec`'d, for a migration that wants its own `self`.
+
+Proved by `spec/pg_ripple/migration_dsl_spec.rb` (14 examples, no database: a hand-written
+fake connection stands in, because a double that answers `respond_to?(:revert)` truthfully
+would take the branch that skips recording), `spec/acceptance/ripple_migrations_spec.rb`
+(the same migration up and down against a live pg_ripple), and
+`spec/pg_ripple/coexistence_spec.rb`, which loads `fx` and `pg_cron` alongside this gem and
+asserts the three gems share no method name — public or private, statements or command
+recorders — that `fx` still owns `create_function` and `create_trigger`, that `pg_cron` still
+owns `create_cron_job`, and that `create_function` still executes for real in the same
+migration as a `ripple` block.
+
+One thing that spec found, unrelated to this gem: `fx` 0.11.0's `invert_create_function` hands
+the whole option hash to `drop_function` (`fx/command_recorder.rb:19`), so
+`create_function :name, sql_definition: …` rolls back into `ArgumentError: unknown keyword:
+:sql_definition` with or without this gem loaded. That is the failure mode
+`PgRipple::CommandRecorder`'s `retaining` was written to avoid, and it is why the coexistence
+example runs `fx` up only.
+
+**Phase 6 addition — `db:rollback` itself, not just `#exec_migration`.** Everything above
+drives the migration through `#exec_migration`, which is what `ActiveRecord::Migrator`
+calls per migration but is not what a user types. `bin/rails db:rollback` is
+`ActiveRecord::MigrationContext#rollback`: it reads a *directory*, builds a
+`MigrationProxy` per file, loads the class out of it, and decides what to revert from the
+`schema_migrations` rows. An anonymous `Class.new(ActiveRecord::Migration::Current)`
+cannot travel that path at all, so there is now one migration on disk —
+`spec/dummy/db/ripple_migrate/20260807000001_create_migspec_objects.rb`, under
+`db/ripple_migrate` so no other part of the dummy application runs it. Its version is
+higher than the dummy schema's own `version:` because `rollback` reverts the *last applied*
+migration and the schema load has already recorded one. The example asserts the
+`schema_migrations` row, the prefix and the rule set all appear on `migrate` and all
+disappear on `rollback`; making the receiver dispatch to `PgRipple.database` instead of the
+migration's `execution_strategy` — the phase-3 hazard, running forwards while Rails
+believes it is reverting — fails it.
 
 ## 5. OPEN: `create_sparql_view` is broken upstream for new names
 
@@ -392,7 +472,13 @@ Two smaller notes from the same phase:
   swallowed exactly that triple and the type was never written. Found by a failing
   example, not by reading.
 
-## 11. SETTLED: what `.graph` returns, what `where.not` means, and a test-harness hazard
+## 11. PARTLY SUPERSEDED BY §16: what `.graph` returns, what `where.not` means, and a
+test-harness hazard
+
+> The `.graph`/`where.not` half stands. The cache half — "the fix is to drop the
+> connection", `reset_dictionary_cache!`, and the `before(:each)` hook in the README — was
+> right that there is a hazard and wrong about which cache and what to do. **§16 replaces
+> it.**
 
 The querying phase. Five things the README's "Graph associations" and "Querying" sections
 do not say, four of them decisions and one of them a bug in the extension that any host
@@ -631,7 +717,7 @@ relation's `#build` did — is the silent version of that error.
 
 ---
 
-## 15. SETTLED: `#lease_connection`, not `ActiveRecord::Base.connection`
+## 15. SUPERSEDED BY §17: `#lease_connection`, not `ActiveRecord::Base.connection`
 
 Every graph read and write went through `connectable.connection`, which for the default
 `connectable` (`ActiveRecord::Base`) is the deprecated permanent-checkout API. Under
@@ -655,3 +741,381 @@ pg_ripple is only transactional with the application's own writes when it runs o
 connection the application is already using, and a block is free to hand back a different one.
 This is the API `spec/support/database.rb` was already using, so the gem was disagreeing with
 its own suite.
+
+---
+
+## 16. SETTLED: the cache is the SPARQL plan cache, and the fix is not `disconnect!`
+
+§11 measured a real hazard and misattributed it. `docs/probe-cache-invalidation.md`
+discriminates the mechanism rather than inferring it: `pg_ripple.plan_cache_reset()` first
+gives 1, a different variable name (a different cache key) gives 1, unchanged gives 0;
+`plan_cache_stats()` reports round 2 as a HIT; `explain_sparql(..., 'sql')` shows the
+generated SQL filtering on `p = 31 … s = 30` in round 1 and `p = 35 … s = 34` in round 2.
+
+**What is true.** pg_ripple compiles SPARQL to SQL with the dictionary ids of its constants
+embedded as integer literals and caches it per backend, keyed on the query text.
+`xact_callback_c` clears the dictionary caches on `XACT_EVENT_ABORT` and never resets the
+plan cache. After an abort the dictionary mints new ids; the cached plan filters on the
+dead ones and returns zero rows, silently, for the life of that backend. `DISCARD ALL`,
+`flush_encode_cache()`, `invalidate_catalog_cache()` and the documented
+`pg_ripple.plan_cache_size = 0` kill switch were each measured and none of them clears it.
+
+**What changed in the gem.**
+
+- `PgRipple::PlanCache` — the whole mechanism, and the seam. `Invalidation` is prepended to
+  `PostgreSQLAdapter` (not `AbstractAdapter`: `PostgreSQL::DatabaseStatements` defines
+  `#exec_rollback_db_transaction` itself and would shadow it) and *marks* the connection on
+  rollback, on `ROLLBACK AND CHAIN`, and on `ROLLBACK TO SAVEPOINT`. The reset itself runs
+  lazily, at the gem's connection seam, before the next statement — issuing a query inside
+  `#exec_rollback_db_transaction` runs while the transaction manager still has the aborted
+  transaction on its stack and can materialise a `BEGIN` nobody asked for.
+- Only a connection this gem has run a `pg_ripple.*` statement on is ever marked, which is
+  what makes the reset safe to issue without first asking whether the extension exists. A
+  failed statement marks it too — a statement that raises has already minted ids — which
+  covers the abort that never reaches a `ROLLBACK`: a failure outside an explicit
+  transaction.
+- On by default, `PgRipple::Configuration#reset_plan_cache_on_rollback` turns it off. It is
+  on by default because this is a **production** failure and not a test-harness one: a
+  stable constant like `Person.graph.where(role: "engineer")` is minted once ever, and one
+  poisoned pool member answers that query with nothing while the others answer correctly.
+- `PgRipple.reset_plan_cache!` is the manual escape hatch.
+  `PgRipple::TestHelpers.reset_plan_cache!` is the same call;
+  `.reset_dictionary_cache!` is a deprecated alias that warns, kept because §11 published
+  it. Its old body — `connection_pool.disconnect!` — worked by accident and reached into a
+  host application's pool.
+- **The gem's own suite installs no cache hook at all.** `spec/support/database.rb` used to
+  call `reset_dictionary_cache!` before every `:database` example; it now relies on the
+  rollback path a host application relies on, so a regression in that path is a red suite.
+  `spec/pg_ripple/plan_cache_spec.rb` measures both sides: hook off reads `[1, 0, 0]`, hook
+  on reads `[1, 1, 1]`.
+
+**Which reads are exposed.** Only the ones that parse SPARQL: `#sparql`, `#ask`,
+multi-pattern BGPs through `#query_execute`, and every property-path traversal behind
+`graph_has_many`. A single triple pattern goes to `find_triples()`, which takes its terms
+as arguments and has no compiled plan; that is why the first version of the plan-cache spec
+could not reproduce the bug through `repository.query([iri, predicate, nil])`.
+
+**Defect B is documented, not worked around.** `ROLLBACK TO SAVEPOINT` leaves stale entries
+in the *shared-memory* encode cache and writes triples against deleted dictionary ids —
+durable if the enclosing transaction commits, and unfixable from Ruby without flushing a
+process-wide cache on every nested transaction. It is in the README's "Where the
+abstraction leaks" with the version named and the advice stated plainly: avoid
+`requires_new: true` around graph writes on 0.128.0. Both defects have upstream issue
+drafts in `docs/probe-cache-invalidation.md`.
+
+---
+
+## 17. SETTLED: `#with_connection`, superseding §15's lease
+
+§15 replaced `ActiveRecord::Base.connection` with `#lease_connection`, which fixes the
+raise under `permanent_connection_checkout = :disallowed` but keeps the thing Rails is
+deprecating: the connection stays checked out until the request or job ends. §15's argument
+for it — "a `with_connection` block is free to hand back a different connection", so
+pg_ripple would not be transactional with the application's own writes — is wrong about
+what `with_connection` does. If a connection is already checked out (inside
+`ActiveRecord::Base.transaction`, or inside the application's own `with_connection`) the
+block is handed *that* connection and does not release it. Outside a transaction each
+statement is its own transaction anyway, so which pool member serves it is not a
+correctness question.
+
+`PgRipple::ConnectionLeasing` is now the single seam. `PgRipple::Repository` and
+`PgRipple::Adapters::Postgres` include it and nothing else in the gem asks for a
+connection. The lifetime rule that comes with the block form is real and is respected:
+nothing that outlives the block may hold the connection, so `exec_query(...).rows`,
+`exec_update`, and `QueryExecutor.call` all materialise inside it and
+`Adapters::Postgres::Connection` (a `SimpleDelegator`, rebuilt per call) never escapes.
+Rails 7.1 has no `#with_connection`; there the fallback yields `#connection`, which on 7.1
+is neither deprecated nor disallowed.
+
+Proof is `spec/acceptance/connection_checkout_spec.rb`, which sets
+`ActiveRecord.permanent_connection_checkout = :disallowed` and then runs a graph read, a
+SPARQL SELECT, a catalog read, a migration statement, `Person.create!`, a `graph_has_many`
+traversal and `PgRipple.reset_plan_cache!`. Its first example asserts that
+`ActiveRecord::Base.connection` still raises under that setting, so the other seven cannot
+pass vacuously — it releases the thread's lease first, because `#connection` only raises
+when there is no lease, and it is tagged `:no_transaction` because the suite's own
+transaction wrapper is itself a `with_connection` block.
+
+One spec called the deprecated API too: `spec/acceptance/transactions_spec.rb` used
+`Person.connection.execute` to force a duplicate-key failure. It uses
+`Person.with_connection` now.
+
+**Correction from phase 6 — the setting alone did not make that spec honest.** Reverting
+`ConnectionLeasing#with_ripple_connection` to `connectable.connection` left *eight of the
+ten* examples still passing, and which two failed depended on the seed. The reason is in
+`connection_handling.rb:277`: `#connection` raises only when the pool has no **permanent**
+lease, and inside the suite's transaction wrapper — itself a `with_connection` block —
+it quietly returns the connection already checked out. The file now stubs
+`ActiveRecord::Base.connection` to raise unconditionally for every example except the
+guard (tagged `:real_connection`). That is what `:disallowed` means as a proposition about
+this gem — it must never call that method — and it is now falsifiable: with the same
+revert in place, eight of ten fail on every seed, and the ninth
+(`PgRipple.reset_plan_cache!`, which has its own `with_connection` branch in
+`lib/pg_ripple.rb` rather than going through `ConnectionLeasing`) fails under the
+matching revert there. Phase 6 also added the two seams that did not exist when the file
+was written: a `ripple do … end` migration run unwrapped, and a `graph_includes` preload.
+
+---
+
+## 18. SETTLED: `graph_includes` — the frame, the path associations, and `strict_loading`
+
+README "Preloading" published a three-line example whose API does not exist and whose query
+does not run. [`probe-jsonld-framing.md`](probe-jsonld-framing.md) measured why, against a
+live 0.128.0; this section is what was built on top of it, plus the two things that were
+measured while building it and are in neither document.
+
+**The call.** `sparql_construct_jsonld(query)` takes one argument and returns unframed
+expanded JSON-LD; `jsonld_frame(input, frame, embed, explicit, ordered)` is what nests it.
+`PgRipple::Repository#construct_framed` sends both in one statement, with the query and the
+frame as bind parameters. `export_jsonld_framed` — the one function that does write its own
+CONSTRUCT from a frame — frames the whole graph and cannot be restricted to a page, so it is
+unusable for preloading. The README's single call was never a thing.
+
+**Framing vs. batching, decided.** The probe measured framed CONSTRUCT at 3.9 ms against
+2.4 ms for one batched `sparql()` per association, on 20 subjects, and left the choice open.
+Framing is what got built, for the reason the README gives it: **one** round trip to the
+store regardless of how many associations are named, and a payload the hydrator reads by
+`@id` with no join key to reconcile. The 1.5 ms is a per-page constant, not per record, and
+it buys a shape that does not multiply with the number of associations on the page. The
+batched alternative remains the honest fallback if depth ever makes framing lose badly, and
+`Preloader.construct` is the only place that would have to change.
+
+**A path association is preloadable — the frame never sees the path.** This is the question
+the phase was told to answer honestly, and the answer is "supported", not "refused". A frame
+nests *properties*; `+ex.manages` is not a property and cannot be a key in one. So each
+association is projected onto its own synthetic predicate in the CONSTRUCT *template* —
+`?s <urn:x-pg-ripple:include:0> ?o0` — while the traversal itself stays in the `WHERE`,
+where SPARQL evaluates it:
+
+```sparql
+CONSTRUCT { ?s a <urn:x-pg-ripple:frame-root> . ?s <urn:x-pg-ripple:include:0> ?o0 }
+WHERE     { VALUES ?s { … } OPTIONAL { { ?s ex:manages+ ?o0 } UNION { ?s ex:worksAt ?o1 } } }
+```
+
+Measured: a `+` path projected this way returns the whole reachable set (bob *and* carol from
+alice), which is what `alice.reports` means; a `^ex:manages` inverse and a
+`^ex:worksAt/ex:worksAt` sequence render and evaluate the same way. Nothing is written — a
+CONSTRUCT's output is a value, not a store — so the invented IRIs cost nothing and cannot
+collide with data. The root type is this gem's own `urn:x-pg-ripple:frame-root`, asserted by
+the template, rather than the model's declared `graph type:`: it decouples preloading from
+whether a model declared a type at all, and it cannot be matched by a subject that carries
+the model's type for some other reason.
+
+**Two new measurements, not in the probe.**
+
+1. **A one-root result is not wrapped in `@graph`.** With two or more roots the document is
+   `{"@graph": [ … ]}`; with exactly one it is the bare node object. The probe only ever
+   framed multi-root pages. A page of one is every `find`-shaped preload, so a hydrator that
+   only knew `@graph` would silently preload nothing for the commonest page there is.
+   `Preloader.nodes` reads both.
+2. **Sibling `OPTIONAL`s are replaced by one `OPTIONAL` over a `UNION`.** The probe recorded
+   the Cartesian product (3 reports × 1 employer returned the employer 3×) as something the
+   consumer must de-duplicate. It does not have to be produced: under a `UNION` each solution
+   binds one branch's variable and leaves the others unbound, an unbound variable simply
+   omits its triple from the template, and the solution count goes from the product of the
+   branches to their sum. A subject that matches no branch still appears, carrying only the
+   root type, which is what keeps "the OPTIONAL did not match" distinguishable from "the
+   subject is not on the page". De-duplication by `@id` is kept anyway; it is now a guard
+   rather than a necessity.
+
+**Hydration.** Driven from the *requested* association list, never from the payload's keys:
+an `OPTIONAL` that did not match is an absent key, indistinguishable from "the frame never
+asked", so every requested association is marked loaded and defaults to empty. IRIs in
+JSON-LD are bare — the settled `btrim(…, '<>')` belongs to the lateral `sparql()` path and
+would corrupt these. Values are always arrays at every level, so there is no one-vs-many case
+to write; a value with no `@id` (a literal) is dropped rather than becoming a `nil` record.
+Records are then loaded one SQL query per *target class*, so two associations onto the same
+model are one `WHERE iri IN (…)`.
+
+**`strict_loading`.** `PgRipple::Configuration#strict_loading` existed and was read by
+nothing. It now raises `ActiveRecord::StrictLoadingViolationError` from the association
+reader when the association was not preloaded, matching ActiveRecord's own error class and
+semantics — and ActiveRecord's per-record/per-relation `strict_loading` flag counts too, so
+`Person.strict_loading.find(1)` means the same thing about a graph association as it does
+about a `has_many`. `#<name>_relation` never raises: it is the explicit "query this one
+anyway", and a method whose only purpose is to run the query cannot be the one that refuses.
+
+Two consequences worth stating. The README's own initializer line,
+`c.strict_loading = Rails.env.local?`, is **true in the test environment**, so loading the
+dummy app's copy of it turned strict loading on for the whole suite and made every lazy read
+raise. `spec/rails_helper.rb` now resets the flag to the gem default before each example and
+the examples about it turn it on for themselves; the dummy initializer still mirrors the
+README verbatim. And `Person.where(role: "manager")` in README "Preloading" was never
+runnable: `role` is a graph-only property in the README's own model, so the line is
+`Person.graph.where(role: "manager")`.
+
+**Where it hangs.** `graph_includes` is installed on the model's own relation delegate
+classes (`Person::ActiveRecord_Relation` and the association/collection ones) via
+`relation_delegate_class`, not by reopening `ActiveRecord::Relation` — a model with no graph
+mapping should not answer the call at all. The preload runs in `#exec_queries`, which is
+where ActiveRecord runs its own preloaders: after the records exist, before `#load` returns,
+once, and never for a relation nobody loaded. `PgRipple::Relation` treats `graph_includes`
+as one of its relation builders, so `Person.graph.where(…).graph_includes(…)` stays a
+`PgRipple::Relation` and the `LIMIT`-pushdown decision of §1/§2 is still its to make.
+
+`spec/acceptance/preloading_spec.rb` asserts query *counts*, not that records come back: the
+README's line is 4 statements (the page, one framed CONSTRUCT, one row-load per target class)
+and 0 for every subsequent read, against 6 for the same page read lazily.
+
+
+## 19. SETTLED: `PgRipple::CommandRecorder` injected an unnamespaced `keyword_hash`
+
+`PgRipple.load` does `ActiveRecord::Migration::CommandRecorder.include(PgRipple::CommandRecorder)`,
+which puts every name in that module onto an object shared with every other extension gem in
+the application. Enumerated at runtime rather than by grep:
+
+    PgRipple::CommandRecorder private instance methods
+      -> [:keyword_hash, :perform_ripple_inversion]
+
+`keyword_hash` was the one name in the module — public or private — without `ripple` in it,
+which is exactly the collision the file's own header comment says it is avoiding. Nothing
+collides today: F(x) 0.11.0 defines its `keyword_hash` only inside its private
+`Fx::CommandRecorder::Arguments` class, and ActiveRecord 8.1.3's `CommandRecorder` defines
+none. It was a latent, silent collision, and a private method is overwritten as quietly as a
+public one.
+
+Renamed to `ripple_keyword_hash`. The nested `PgRipple::CommandRecorder::Arguments#keyword_hash`
+is left alone and is not the same problem: it is private to a `private_constant` class of
+this gem's own.
+
+`spec/pg_ripple/coexistence_spec.rb` gained the stronger assertion this needed — not "does it
+collide with the two gems on this Gemfile" (which passed throughout) but "every name either
+shared-object mix-in contributes, private included, is namespaced, and neither exports a
+constant". `PgRipple::Statements` was already clean by that test: 15 public and 5 private
+methods, every one containing `ripple`, and no constants.
+
+## 20. SETTLED: the plan-cache invalidation never fired for the lateral join
+
+§16 built the rollback→poison→reset protocol and hung it off
+`PgRipple::ConnectionLeasing#with_ripple_statement`. That covers `PgRipple.repository` and
+the migration statements. It does **not** cover the queries `docs/probe-cache-invalidation.md`
+§3 names as the most exposed in the gem: `Model.graph`, every `graph_has_many` reader and
+every property-path traversal run `pg_ripple.sparql()` inside a `JOIN LATERAL` that
+*ActiveRecord* executes, so they never pass through that seam.
+
+Measured on a fresh backend against a live 0.128.0, before the fix:
+
+| after | `PlanCache.touched?` |
+| --- | --- |
+| (fresh connection) | false |
+| `alice.friends.count` — a `graph_has_many` traversal | **false** |
+| `Person.graph.where(role: "engineer").to_a` | **false** |
+| `PgRipple.repository.count` | true |
+
+An unmarked connection is never poisoned: `poison!` returns early on `unless touched?`, so
+the rollback hook no-oped, `recover!` never ran, and a backend that rolled back after a
+traversal would answer that traversal with zero rows for the rest of its life. The
+counterfactual, same probe with the fix reverted, is in the commit: `touched?` false→true and
+`poisoned?` false→true after a rolled-back traversal.
+
+**The fix.** The protocol moved into `PgRipple::PlanCache.around_statement`, which is now the
+one definition of "run pg_ripple SQL on this connection" — recover, mark, treat a raise as
+poisoning — and has two callers: `with_ripple_statement` as before, and
+`PgRipple::PlanCache::Invalidation#internal_exec_query`, prepended onto the PostgreSQL
+adapter next to the rollback hooks.
+
+Three decisions inside that:
+
+* **`#internal_exec_query`, not `#exec_queries`.** The first hook written was on the relation,
+  and it was wrong: `#count`, `#pluck` and `#exists?` never reach `#exec_queries` — they reach
+  the server through `select_all` → `select` → `internal_exec_query`. Measured: with the
+  relation hook, `alice.friends.count` still left the connection unmarked. One adapter method
+  covers all four spellings.
+* **Recognised by the join alias, not by `"pg_ripple"`.** `PgRipple::Relation::ALIAS_PREFIX`
+  (`"pg_ripple_graph_"`) appears in nothing but this gem's own lateral. Matching `"pg_ripple"`
+  would match `SELECT pg_ripple.plan_cache_reset()` — the recovery statement itself — and
+  recurse: a reset that looks like a statement needing a reset.
+* **The cost is one `String#include?`** against a string ActiveRecord has just built, on
+  every statement, and nothing else for an application that never touches the graph.
+
+`spec/acceptance/plan_cache_lateral_spec.rb` is the coverage, including an example asserting
+that the prepended method still wraps one ActiveRecord defines — a `prepend` over a method
+that has moved is a silent no-op, which is the failure this whole entry is about.
+
+## 21. SETTLED: a named graph written as a `String` broke `graph_includes` only
+
+Every entry point in the gem takes a graph as a `String`: `PgRipple.repository(graph_name:)`,
+`PgRipple::Query.new(graph_name:)`, `PgRipple::Relation#in_graph`, and the README's own
+initializer line `c.default_graph = nil # nil = default graph`, whose non-nil form is a URL.
+`PgRipple::Associations::Definition#graph_name` returned the raw value, uncoerced. The lazy
+read went through `Query`, which coerces; the preload went through `Preloader.construct`,
+which hands the value to `PgRipple::Term.sparql` and demands an `RDF::Term`.
+
+So this worked and this did not, on the same association, against a live 0.128.0:
+
+    graph_has_many :hr_reports, path: +ex.manages, graph_name: "https://app.example.com/graphs/hr"
+
+    alice.hr_reports                                  # => [#<Person Bob>]
+    Person.where(id: alice.id).graph_includes(:hr_reports)
+      # ArgumentError: "https://app.example.com/graphs/hr" is not an RDF::Term
+      #   term.rb:68 <- preloader.rb:138 <- preloader.rb:198 <- preloading.rb:133
+
+and the same for `PgRipple.configuration.default_graph = "https://…"`, which broke
+`graph_includes` for **every** association in the application. Note where it raised: in
+`#exec_queries`, so it was every *load of the relation* and not only the association read.
+
+`Definition#graph_name` now coerces exactly as `Query` does — `RDF::URI(Term.graph_argument(…))`,
+so the angle brackets an N-Triples IRI wears mean the same graph as none. That also fixes a
+second, quieter thing: `Preloader` groups definitions by this value to decide how many
+`CONSTRUCT`s to run, and a `String` and an equal `RDF::URI` are different `Hash` keys, so two
+associations naming one graph two ways were two round trips.
+
+The dummy app's `Person` now declares such an association, with the graph as a `String`, and
+`spec/acceptance/preloading_spec.rb` reads it both ways.
+
+## 22. SETTLED: `#merge` dropped `graph_includes`, silently
+
+`ActiveRecord::SpawnMethods#merge` spawns the *receiver* and folds the argument in through
+`Relation::Merger`, which copies the values ActiveRecord knows about and nothing else. §18's
+`#spawn` override therefore carried the receiver's includes and lost the argument's:
+
+    Person.graph_includes(:reports).merge(Person.where(active: true))   # => [:reports]
+    Person.where(active: true).merge(Person.graph_includes(:reports))   # => []
+
+The second line is the everyday one: `#merge` is how Rails composes named scopes, how a
+`has_many` `scope:` block is applied, and how Ransack and ActiveAdmin build relations. The
+failure was silent — the reader still answered correctly, one traversal per record, i.e. the
+N+1 the method exists to remove, measured at 2 reader queries for 2 records. Only
+`PgRipple.configuration.strict_loading`, off by default, turned it into an error.
+
+Every other spawn path measured clean and needed nothing: `spawn(where)`, `except(:order)`,
+`unscope(:where)`, `only(:where)`, `or`, `reorder`, `scoping`, `CollectionProxy`,
+`AssociationRelation`.
+
+Fixed by overriding `#merge!` — not `#merge`, which is also reached with a `Hash` and with a
+`Proc`; `#merge!` is the one place the argument itself is folded in — to union the two sides'
+values. `spec/acceptance/preloading_spec.rb` asserts 0 reader queries after a merge in either
+direction, and that a merge of two different `graph_includes` preloads both.
+
+## 23. SETTLED, AS A DOCUMENTED NON-FIX: a graph association has no defined order
+
+Reported as a defect: a preloaded association returns the same records as a lazy one **in a
+different order**. Reproduced exactly, alice managing bob, carol and dave, same transaction:
+
+    lazy  = ["Bob", "Carol", "Dave"]     (stable across reads)
+    eager = ["Dave", "Carol", "Bob"]     (stable across reads)
+
+The two come from different places and neither is defined. The lazy read is the lateral join
+over `pg_ripple.sparql()` and comes back in the store's solution order — and a SPARQL query
+with no `ORDER BY` has no defined solution order at all, which is the same fact
+`PgRipple::Relation#find_in_batches` already has to work around. The preloaded read is the
+JSON-LD reference order out of `jsonld_frame`, filter-mapped through `klass.where(iri: iris)`.
+
+Not changed, and the reasoning is worth keeping. Making them agree means giving both a
+defined key, which means an `ORDER BY` on the association's relation — and that is a worse
+trade than the thing it fixes:
+
+* A baked-in `order(:id)` is *appended to*, not replaced by, a caller's own: `alice.reports.order(:name)`
+  would become `ORDER BY id, name`. ActiveRecord's `has_many` does not do this, and a caller
+  cannot undo it without `reorder`.
+* It puts a sort on every traversal, including the ones whose whole point is that the store
+  already did the work.
+* `ActiveRecord` itself promises no order for an unordered `has_many`. This is the same
+  promise, kept the same way.
+
+So the position is: **the order of a graph association is undefined on both paths, exactly as
+an unordered `has_many` is undefined, and a caller who cares must say `.order(…)`.** What is
+now asserted, in `spec/acceptance/preloading_spec.rb`, is the thing that has to be true: under
+an explicit `.order(:name)` the lazy and preloaded reads agree. (A preloaded association is a
+*loaded relation*, so `.order` spawns and re-queries — one query, same as a loaded `has_many`.)
+README "Preloading" says so in prose.

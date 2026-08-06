@@ -49,6 +49,21 @@ RSpec.configure do |config|
   # The suite order is random, so an acceptance example that inherited whatever
   # ran before it would mint IRIs under the wrong host. This puts back what
   # `spec/dummy/config/initializers/pg_ripple.rb` set.
+  # The dummy's initializer is the README's, verbatim, and the README's line is
+  # `c.strict_loading = Rails.env.local?` — which is *true* in the test
+  # environment. Loading it therefore turns strict loading on for the whole
+  # suite, and every example that reads a graph association lazily (which is
+  # most of them, deliberately: lazy is the documented default and it has to
+  # keep working) would raise `StrictLoadingViolationError`.
+  #
+  # So the flag is put back to the gem's own default before each example, and
+  # the examples that are *about* it turn it on for themselves. A `before` hook
+  # registered here runs before any hook a spec file registers, so an example
+  # that wants it on still gets it on.
+  config.before do
+    PgRipple.configuration.strict_loading = false
+  end
+
   config.before(:each, :database) do |example|
     next unless example.metadata[:file_path].include?("/spec/acceptance/")
 

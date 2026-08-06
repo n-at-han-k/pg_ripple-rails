@@ -23,13 +23,20 @@ module DatabaseHelper
     return @connected if defined?(@connected)
 
     ActiveRecord::Base.establish_connection(URL)
-    ActiveRecord::Base.lease_connection.execute("CREATE EXTENSION IF NOT EXISTS pg_ripple")
+
+    # What `PgRipple::Railtie` does in an application, done by hand because
+    # this suite has no application. Among other things it installs the
+    # rollback hook that resets the SPARQL plan cache
+    # ({PgRipple::PlanCache}), which the suite depends on for exactly the
+    # reason a host app does.
+    PgRipple.load
+    ActiveRecord::Base.with_connection { |c| c.execute("CREATE EXTENSION IF NOT EXISTS pg_ripple") }
     @connected = true
   end
 
   # @param sql [String]
   def execute(sql)
-    ActiveRecord::Base.lease_connection.execute(sql)
+    ActiveRecord::Base.with_connection { |c| c.execute(sql) }
   end
 end
 
@@ -45,23 +52,23 @@ RSpec.configure do |config|
   config.around(:each, :database) do |example|
     next example.run unless DatabaseHelper.available?
 
-    # A rolled-back transaction takes the triples with it, but *not* the
-    # dictionary ids it minted: pg_ripple 0.128.0 keeps a per-backend cache of
-    # term-to-id, and after a `ROLLBACK` that cache still holds ids whose rows
-    # are gone. The next transaction on that connection then writes triples
-    # against stale ids and every query for those terms returns nothing —
-    # silently, and only for terms the rolled-back example was the first to
-    # use. Measured: three rounds of insert-then-query in three rolled-back
-    # transactions on one connection return 1, 0, 0; the same three with a
-    # reconnect in between return 1, 1, 1; and three rounds using a *fresh*
-    # term each time return 1, 1, 1 with no reconnect. Dropping the connection
-    # drops the cache, which is why this is here and not in the example.
-    #
-    # `PgRipple::TestHelpers.reset_dictionary_cache!` is the shipped spelling —
-    # the same line a host application's suite needs, so this suite runs the
-    # thing the README tells other people to run.
-    PgRipple::TestHelpers.reset_dictionary_cache!
+    # `:no_transaction` opts out of the wrapper, for the one thing it cannot
+    # host: an example about what a *top-level* rollback does. Nested in this
+    # transaction, `raise ActiveRecord::Rollback` is a savepoint rollback, and
+    # a savepoint rollback has a second pg_ripple defect on it
+    # (`docs/probe-cache-invalidation.md`, defect B) that would mask the one
+    # under test. Such an example is responsible for its own cleanup — the ones
+    # here roll every round back themselves and commit nothing.
+    next example.run if example.metadata[:no_transaction]
 
+    # No cache reset here, deliberately. A rolled-back transaction poisons
+    # pg_ripple's per-backend SPARQL plan cache and the next example on that
+    # connection reads nothing (`docs/probe-cache-invalidation.md`) — but the
+    # gem now marks the connection on rollback and resets the cache before its
+    # next statement, so the suite runs the same code path a host application
+    # runs and would go red if that path broke. `PgRipple::TestHelpers` still
+    # ships `reset_plan_cache!` for the suites the hook cannot see; it has its
+    # own spec.
     ActiveRecord::Base.transaction do
       example.run
       raise ActiveRecord::Rollback

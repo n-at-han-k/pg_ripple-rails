@@ -74,6 +74,21 @@ module PgRipple
     # @return [String, RDF::URI, nil]
     attr_accessor :default_graph
 
+    # Reset pg_ripple's SPARQL plan cache on the connection after a rollback.
+    #
+    # On by default, and it should stay on: with it off, an aborted
+    # transaction leaves the connection it ran on answering some queries with
+    # zero rows for the rest of its life. See {PgRipple::PlanCache} for the
+    # mechanism and `docs/probe-cache-invalidation.md` for the measurements.
+    #
+    # It costs one `SELECT pg_ripple.plan_cache_reset()` after a rollback, on a
+    # connection that has actually run a pg_ripple statement, and nothing at
+    # all on one that has not. Turn it off only if you are resetting the cache
+    # yourself, and know that `PgRipple.reset_plan_cache!` is then your job.
+    #
+    # @return [Boolean]
+    attr_accessor :reset_plan_cache_on_rollback
+
     # When SHACL validation runs relative to the write that triggers it.
     #
     # One of `:sync`, `:async`, `:off`. `:sync` maps to pg_ripple's own
@@ -104,6 +119,7 @@ module PgRipple
       @default_graph = nil
       @validate = :sync
       @strict_loading = false
+      @reset_plan_cache_on_rollback = true
     end
   end
 end

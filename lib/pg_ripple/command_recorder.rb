@@ -33,7 +33,7 @@ module PgRipple
     def invert_create_ripple_prefix(args)
       prefix, expansion = args
 
-      [:drop_ripple_prefix, [prefix, keyword_hash(revert_to_expansion: expansion)]]
+      [:drop_ripple_prefix, [prefix, ripple_keyword_hash(revert_to_expansion: expansion)]]
     end
 
     def invert_drop_ripple_prefix(args)
@@ -191,7 +191,7 @@ module PgRipple
     def invert_create_ripple_endpoint(args)
       arguments = Arguments.new(args)
 
-      [:drop_ripple_endpoint, [arguments.object, keyword_hash(revert_to: arguments.options)]]
+      [:drop_ripple_endpoint, [arguments.object, ripple_keyword_hash(revert_to: arguments.options)]]
     end
 
     def invert_drop_ripple_endpoint(args)
@@ -203,7 +203,7 @@ module PgRipple
           format(MESSAGE_IRREVERSIBLE, :drop_ripple_endpoint, :revert_to)
       end
 
-      [:create_ripple_endpoint, [url, keyword_hash(revert_to.dup)]]
+      [:create_ripple_endpoint, [url, ripple_keyword_hash(revert_to.dup)]]
     end
 
     private
@@ -228,7 +228,15 @@ module PgRipple
       [method, inverted.to_a]
     end
 
-    def keyword_hash(hash)
+    # Prefixed like everything else this module injects.
+    #
+    # This module is `include`d into the *shared*
+    # `ActiveRecord::Migration::CommandRecorder`, alongside whatever every
+    # other extension gem put there, so an unprefixed name here is a silent
+    # collision waiting for the gem that defines the same one. The nested
+    # {Arguments#keyword_hash} is a different matter: it is private to a
+    # `private_constant` class of this gem's own.
+    def ripple_keyword_hash(hash)
       Hash.ruby2_keywords_hash(hash)
     end
 

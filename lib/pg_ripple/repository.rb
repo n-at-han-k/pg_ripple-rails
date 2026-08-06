@@ -3,6 +3,7 @@
 require "json"
 require "rdf"
 
+require "pg_ripple/connection_leasing"
 require "pg_ripple/persistence"
 require "pg_ripple/term"
 
@@ -38,6 +39,8 @@ module PgRipple
   #   repo.query([nil, RDF::Vocab::FOAF.name, nil]).each { |st| puts st }
   #   repo.count
   class Repository < RDF::Repository
+    include PgRipple::ConnectionLeasing
+
     # A SPARQL variable name this gem is willing to write into a query.
     #
     # The check is not defensive quoting — a variable name cannot be escaped,
@@ -120,6 +123,38 @@ module PgRipple
       end
 
       solutions
+    end
+
+    # Runs a SPARQL CONSTRUCT and frames the JSON-LD it returns.
+    #
+    # Two extension calls in one statement, because they are two different
+    # tools and the README's single call does not exist:
+    # `sparql_construct_jsonld(query)` takes **one** argument and returns
+    # unframed expanded JSON-LD, and `jsonld_frame(input, frame, embed, …)` is
+    # what nests it. The other framing entry point,
+    # `export_jsonld_framed(frame, graph, …)`, writes its own CONSTRUCT from
+    # the frame and frames the *whole graph* — it cannot be restricted to a
+    # page, so it is useless for preloading
+    # (`docs/probe-jsonld-framing.md` §a).
+    #
+    # `embed` defaults to `@always` rather than the server's `@once`: under
+    # `@once` a node reachable from two roots is embedded under one of them and
+    # left a bare reference under the other, chosen by hash order (§b.5).
+    #
+    # @param query [String] a SPARQL CONSTRUCT
+    # @param frame [Hash, String] a JSON-LD frame. Build it from full IRIs — a
+    #   compact IRI in a frame is never expanded, not even against the frame's
+    #   own `@context`, and yields an empty result with no error (§f).
+    # @param embed [String] `"@always"`, `"@once"` or `"@never"`
+    # @return [Hash, nil] the framed document
+    def construct_framed(query, frame, embed: "@always")
+      document = scalar(
+        "SELECT pg_ripple.jsonld_frame(" \
+        "pg_ripple.sparql_construct_jsonld($1::text), $2::jsonb, $3::text)",
+        query, frame.is_a?(String) ? frame : JSON.generate(frame), embed
+      )
+
+      document.is_a?(String) ? JSON.parse(document) : document
     end
 
     # pg_ripple's plan for a SPARQL query.
@@ -470,30 +505,6 @@ module PgRipple
       PgRipple::Term.serialize(term)
     end
 
-    # `#lease_connection`, not `#connection`.
-    #
-    # `ActiveRecord::Base.connection` is the deprecated permanent-checkout API.
-    # An application that has set `permanent_connection_checkout = :disallowed`
-    # — the setting Rails is moving towards — gets
-    # `ActiveRecordError: Called deprecated 'ActiveRecord::Base.connection'`
-    # from *every* graph read and write, including from inside its own
-    # `with_connection` block, so there is no way to scope around it; with
-    # `:deprecated` it pins a pool connection to the thread for the process
-    # lifetime. `#lease_connection` is the same lease with none of that.
-    #
-    # It has to be a lease rather than a `with_connection` block: pg_ripple is
-    # only transactional with the application's own writes when it runs on the
-    # connection the application is already using, and a block would be free to
-    # hand back a different one.
-    #
-    # Falls back on Rails 7.1, where `#lease_connection` does not exist yet and
-    # `#connection` is not deprecated.
-    def connection
-      return connectable.lease_connection if connectable.respond_to?(:lease_connection)
-
-      connectable.connection
-    end
-
     # Values are bound, never interpolated — a SPARQL query is full of quotes
     # and full of `$`, and a literal in a triple can contain anything at all.
     # Sent as text and cast in the SQL, so one code path covers strings and
@@ -508,8 +519,13 @@ module PgRipple
       end
     end
 
+    # The result is materialised inside the block: `#with_ripple_statement`
+    # hands the connection back to the pool when it returns, so nothing that
+    # still needs it may escape.
     def query_rows(sql, *values)
-      connection.exec_query(sql, "pg_ripple", binds_for(values)).rows
+      with_ripple_statement do |connection|
+        connection.exec_query(sql, "pg_ripple", binds_for(values)).rows
+      end
     end
 
     def scalar(sql, *values)
@@ -517,7 +533,9 @@ module PgRipple
     end
 
     def execute(sql, *values)
-      connection.exec_update(sql, "pg_ripple", binds_for(values))
+      with_ripple_statement do |connection|
+        connection.exec_update(sql, "pg_ripple", binds_for(values))
+      end
     end
   end
 end

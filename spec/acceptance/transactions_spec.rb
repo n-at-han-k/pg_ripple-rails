@@ -73,10 +73,17 @@ RSpec.describe "transactions" do
 
         # A second row claiming the same IRI: the unique index rejects it, and
         # the graph write that already succeeded goes back with it.
-        Person.connection.execute(<<~SQL)
-          INSERT INTO people (name, iri, created_at, updated_at)
-          VALUES ('dup', #{Person.connection.quote(person.iri)}, now(), now())
-        SQL
+        #
+        # `#with_connection`, not `Person.connection`: the latter is the
+        # deprecated permanent checkout and raises under
+        # `permanent_connection_checkout = :disallowed`, which
+        # `spec/pg_ripple/connection_checkout_spec.rb` turns on.
+        Person.with_connection do |conn|
+          conn.execute(<<~SQL)
+            INSERT INTO people (name, iri, created_at, updated_at)
+            VALUES ('dup', #{conn.quote(person.iri)}, now(), now())
+          SQL
+        end
       end
     }.to raise_error(ActiveRecord::RecordNotUnique)
 

@@ -34,7 +34,7 @@ module PgRipple
     # a single `DELETE DATA … ; INSERT DATA …` request. Nothing that did not
     # move is written.
     #
-    # Everything runs on `ActiveRecord::Base.connection`, inside whatever
+    # Everything runs on the application's own connection, inside whatever
     # transaction the caller is already in. No connection is opened and no
     # transaction is started here: rows and triples commit or roll back
     # together because they are the same transaction, not because anything

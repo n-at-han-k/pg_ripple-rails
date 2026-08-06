@@ -79,6 +79,10 @@ module PgRipple
       end
     end
 
+    # What every lateral's alias starts with, and the marker
+    # {PgRipple::PlanCache::Invalidation} recognises a traversal by.
+    ALIAS_PREFIX = "pg_ripple_graph_"
+
     class << self
       # Attaches a graph traversal to an `ActiveRecord::Relation`.
       #
@@ -111,6 +115,25 @@ module PgRipple
         scope.joins(Arel::Nodes::StringJoin.new(literal))
       end
 
+      # Whether a piece of SQL is one of {.attach}'s laterals.
+      #
+      # Asked by {PgRipple::PlanCache::Invalidation} of every statement the
+      # PostgreSQL adapter runs, because a traversal reaches the server through
+      # ActiveRecord's own query path and never through
+      # {PgRipple::ConnectionLeasing} — see {PgRipple::PlanCache.around_statement}.
+      #
+      # {ALIAS_PREFIX} rather than `"pg_ripple"`, and that is the whole reason
+      # the alias has a prefix worth naming: `pg_ripple.plan_cache_reset()` is
+      # itself pg_ripple SQL, and a test that matched it would recurse — the
+      # reset would look like a statement that needs a reset. Nothing but this
+      # gem's own lateral ever spells {ALIAS_PREFIX}.
+      #
+      # @param sql [String]
+      # @return [Boolean]
+      def lateral?(sql)
+        sql.is_a?(String) && sql.include?(ALIAS_PREFIX)
+      end
+
       # The lateral's alias, derived from the traversal it runs.
       #
       # Counting the joins already on the scope does not work: every graph
@@ -129,7 +152,7 @@ module PgRipple
       # @param sparql [String]
       # @return [String]
       def join_alias(sparql)
-        "pg_ripple_graph_#{Digest::SHA256.hexdigest(sparql)[0, 16]}"
+        "#{ALIAS_PREFIX}#{Digest::SHA256.hexdigest(sparql)[0, 16]}"
       end
 
       # @param model [Class]
@@ -346,7 +369,14 @@ module PgRipple
     def self.relation_builders
       @relation_builders ||= (
         ActiveRecord::QueryMethods.public_instance_methods(false) +
-        ActiveRecord::SpawnMethods.public_instance_methods(false)
+        ActiveRecord::SpawnMethods.public_instance_methods(false) +
+        # Not ActiveRecord's, but exactly one of these: it returns a relation
+        # and changes nothing about the traversal, so `Person.graph.where(role:
+        # "manager").graph_includes(:reports)` has to stay a
+        # {PgRipple::Relation} rather than dissolving into an
+        # `ActiveRecord::Relation` that can no longer decide whether the
+        # `LIMIT` may go into the SPARQL.
+        %i[graph_includes]
       ).to_set - %i[where limit offset arel structurally_compatible?]
     end
 

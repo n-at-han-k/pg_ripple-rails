@@ -151,6 +151,54 @@ RSpec.describe PgRipple::Associations, :database do
     end
   end
 
+  # Every other entry point in the gem takes a graph as a String, so this one
+  # has to as well — and it has to hand the *same object* to both readers, or
+  # the lazy path (which coerces, through PgRipple::Query) and the preload
+  # path (which does not, and raised) disagree about what a graph is.
+  # `docs/spec-corrections.md` §21.
+  describe "Definition#graph_name" do
+    def definition(graph_name)
+      PgRipple::Associations::Definition.new(
+        :reports, owner: nil, path: +ex.manages, class_name: "Person", graph_name: graph_name
+      )
+    end
+
+    it "coerces a String to an RDF::URI" do
+      expect(definition("https://app.example.com/hr").graph_name)
+        .to eq(RDF::URI("https://app.example.com/hr"))
+    end
+
+    it "strips the angle brackets an N-Triples IRI wears" do
+      expect(definition("<https://app.example.com/hr>").graph_name)
+        .to eq(RDF::URI("https://app.example.com/hr"))
+    end
+
+    it "leaves the default graph as nil" do
+      expect(definition(nil).graph_name).to be_nil
+    end
+
+    it "coerces the configured default the same way" do
+      PgRipple.configuration.default_graph = "https://app.example.com/main"
+
+      expect(
+        PgRipple::Associations::Definition.new(
+          :reports, owner: nil, path: +ex.manages, class_name: "Person"
+        ).graph_name
+      ).to eq(RDF::URI("https://app.example.com/main"))
+    ensure
+      PgRipple.configuration.default_graph = nil
+    end
+
+    # What PgRipple::Preloader groups on to decide how many CONSTRUCTs to run.
+    # A String and an equal RDF::URI are different Hash keys, so without the
+    # coercion two associations naming one graph two ways were two round trips.
+    it "is one group key however the graph was written" do
+      keys = [definition("https://app.example.com/hr"), definition(RDF::URI("https://app.example.com/hr"))]
+
+      expect(keys.group_by(&:graph_name).size).to eq(1)
+    end
+  end
+
   describe "graph_has_one" do
     it "returns the record, and the relation is next door" do
       _, people = fixture

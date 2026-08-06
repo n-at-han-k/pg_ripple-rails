@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "pg_ripple/connection_leasing"
 require "pg_ripple/adapters/postgres/connection"
 require "pg_ripple/adapters/postgres/prefixes"
 require "pg_ripple/adapters/postgres/shapes"
@@ -64,6 +65,8 @@ module PgRipple
     #    config.adapter = PgRipple::Adapters::Postgres.new
     #  end
     class Postgres
+      include PgRipple::ConnectionLeasing
+
       # The schedule `create_sparql_view` itself defaults to. Repeated here
       # rather than left to the server default because the dumper has to write
       # a value out, and the two must agree.
@@ -77,7 +80,7 @@ module PgRipple
       #
       # Checked by every statement and every reader below.
       def pg_ripple_enabled?
-        connection.pg_ripple_enabled?
+        with_connection(&:pg_ripple_enabled?)
       end
 
       # Whether pg_trickle is installed in this database.
@@ -88,7 +91,7 @@ module PgRipple
       # pull it in, so `pg_ripple_enabled?` alone does not imply a view can be
       # created.
       def pg_trickle_enabled?
-        connection.pg_trickle_enabled?
+        with_connection(&:pg_trickle_enabled?)
       end
 
       # The installed pg_ripple version, e.g. "0.128.0", or nil when absent.
@@ -101,7 +104,7 @@ module PgRipple
       def pg_ripple_version
         return nil unless pg_ripple_enabled?
 
-        connection.pg_ripple_version
+        with_connection(&:pg_ripple_version)
       end
 
       # Every registered namespace prefix, minus the ones pg_ripple seeds.
@@ -110,7 +113,7 @@ module PgRipple
       def prefixes
         return [] unless pg_ripple_enabled?
 
-        PgRipple::Adapters::Postgres::Prefixes.all(connection)
+        with_connection { |conn| PgRipple::Adapters::Postgres::Prefixes.all(conn) }
       end
 
       # Every loaded SHACL shape.
@@ -122,7 +125,7 @@ module PgRipple
       def shapes
         return [] unless pg_ripple_enabled?
 
-        PgRipple::Adapters::Postgres::Shapes.all(connection)
+        with_connection { |conn| PgRipple::Adapters::Postgres::Shapes.all(conn) }
       end
 
       # Every Datalog rule set, with its rules re-joined in load order.
@@ -131,7 +134,7 @@ module PgRipple
       def rule_sets
         return [] unless pg_ripple_enabled?
 
-        PgRipple::Adapters::Postgres::RuleSets.all(connection)
+        with_connection { |conn| PgRipple::Adapters::Postgres::RuleSets.all(conn) }
       end
 
       # Every SPARQL view.
@@ -144,7 +147,7 @@ module PgRipple
       def sparql_views
         return [] unless pg_ripple_enabled?
 
-        PgRipple::Adapters::Postgres::SparqlViews.all(connection)
+        with_connection { |conn| PgRipple::Adapters::Postgres::SparqlViews.all(conn) }
       end
 
       # Every registered federation endpoint.
@@ -153,7 +156,7 @@ module PgRipple
       def endpoints
         return [] unless pg_ripple_enabled?
 
-        PgRipple::Adapters::Postgres::Endpoints.all(connection)
+        with_connection { |conn| PgRipple::Adapters::Postgres::Endpoints.all(conn) }
       end
 
       # Registers a namespace prefix.
@@ -228,9 +231,11 @@ module PgRipple
       def update_shapes(turtle, orphaned_shape_iris = [])
         return unless pg_ripple_enabled?
 
-        connection.transaction do
-          create_shapes(turtle)
-          orphaned_shape_iris.each { |shape_iri| drop_shape(shape_iri) }
+        with_connection do |conn|
+          conn.transaction do
+            create_shapes(turtle)
+            orphaned_shape_iris.each { |shape_iri| drop_shape(shape_iri) }
+          end
         end
       end
 
@@ -446,15 +451,25 @@ module PgRipple
 
       attr_reader :connectable
 
-      # `#lease_connection` where it exists (Rails 7.2+), `#connection` where it
-      # does not. `ActiveRecord::Base.connection` is the deprecated permanent
-      # checkout, and an application with `permanent_connection_checkout =
-      # :disallowed` raises out of it rather than deprecating — which would
-      # make every migration in this gem unrunnable.
-      def connection
-        raw = connectable.respond_to?(:lease_connection) ? connectable.lease_connection : connectable.connection
+      # The connection, for the duration of a block.
+      #
+      # `#with_connection`, not `ActiveRecord::Base.connection`: see
+      # {PgRipple::ConnectionLeasing} for why, and for the Rails 7.1 fallback.
+      # Decorated per call with {PgRipple::Adapters::Postgres::Connection},
+      # which is a delegator and must not outlive the block either.
+      def with_connection
+        with_ripple_connection do |raw|
+          yield PgRipple::Adapters::Postgres::Connection.new(raw)
+        end
+      end
 
-        PgRipple::Adapters::Postgres::Connection.new(raw)
+      # As {#with_connection}, for the statements that call a `pg_ripple.*`
+      # function — the ones that mint dictionary ids and so populate the plan
+      # cache. Reached only after a `pg_ripple_enabled?` guard.
+      def with_statement_connection
+        with_ripple_statement do |raw|
+          yield PgRipple::Adapters::Postgres::Connection.new(raw)
+        end
       end
 
       # Runs a statement with its arguments bound as parameters, discarding the
@@ -472,13 +487,13 @@ module PgRipple
       # type map. There is nothing to cast void to that would silence it, so
       # this is the fix rather than a preference.
       def execute_with_binds(sql, *values)
-        connection.exec_update(sql, "pg_ripple", binds_for(values))
+        with_statement_connection { |conn| conn.exec_update(sql, "pg_ripple", binds_for(values)) }
       end
 
       # As {#execute_with_binds}, for the functions whose return value the
       # caller wants — `load_shacl` and `load_rules` both return a count.
       def value_with_binds(sql, *values)
-        connection.exec_query(sql, "pg_ripple", binds_for(values)).rows.dig(0, 0)
+        with_statement_connection { |conn| conn.exec_query(sql, "pg_ripple", binds_for(values)).rows.dig(0, 0) }
       end
 
       def binds_for(values)

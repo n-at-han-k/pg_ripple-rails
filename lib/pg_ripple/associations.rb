@@ -5,8 +5,10 @@ require "rdf"
 
 require "pg_ripple/path"
 require "pg_ripple/persistence"
+require "pg_ripple/preloading"
 require "pg_ripple/query"
 require "pg_ripple/relation"
+require "pg_ripple/term"
 
 module PgRipple
   # `graph_has_many` and `graph_has_one`: associations with no foreign key.
@@ -26,6 +28,11 @@ module PgRipple
   #     graph_has_many :colleagues, path: ~ex.worksAt / ex.worksAt
   module Associations
     extend ActiveSupport::Concern
+
+    included do
+      # `graph_includes` on this model's relations.
+      PgRipple::Preloading.install(self)
+    end
 
     # What one `graph_has_many` or `graph_has_one` declared.
     class Definition
@@ -65,11 +72,34 @@ module PgRipple
         @target ||= (@class_name || name.to_s.classify).constantize
       end
 
-      # @return [RDF::URI, nil]
+      # The named graph this association traverses, always as an {RDF::URI}.
+      #
+      # Coerced here rather than at each use, for two reasons measured on a
+      # live database (`docs/spec-corrections.md` §21):
+      #
+      # * Every other entry point in the gem takes a graph as a `String` —
+      #   `PgRipple.repository(graph_name: "https://…")`, `Query.new`,
+      #   `Relation#in_graph` — and the README's initializer writes
+      #   `c.default_graph` as one. The lazy read went through
+      #   {PgRipple::Query}, which coerces; the preload went through
+      #   {PgRipple::Preloader.construct}, which hands the value straight to
+      #   {PgRipple::Term.sparql} and raises `ArgumentError` for anything that
+      #   is not already an `RDF::Term`. So `graph_has_many …, graph_name:
+      #   "https://…"` read fine lazily and exploded under `graph_includes`.
+      # * {PgRipple::Preloader} groups definitions by this value to decide how
+      #   many `CONSTRUCT`s to run. A `String` and an equal `RDF::URI` are
+      #   different hash keys, so two associations naming the same graph two
+      #   ways were split into two round trips.
+      #
+      # `Term.graph_argument` first, so a value written with the angle brackets
+      # it wears in N-Triples means the same graph as one without.
+      #
+      # @return [RDF::URI, nil] nil for the default graph
       def graph_name
-        return PgRipple.configuration.default_graph if @graph_name == :configured
+        value = (@graph_name == :configured) ? PgRipple.configuration.default_graph : @graph_name
+        return nil if value.nil?
 
-        @graph_name
+        RDF::URI(PgRipple::Term.graph_argument(value))
       end
 
       # The traversal, from one record.
@@ -191,7 +221,7 @@ module PgRipple
           pg_ripple_association.statements_for(pg_ripple_require_owner, records.flatten),
           repository: pg_ripple_repository
         )
-        reset
+        pg_ripple_reset
         self
       end
       alias_method :push, :<<
@@ -209,7 +239,7 @@ module PgRipple
           pg_ripple_association.statements_for(pg_ripple_require_owner, records),
           repository: pg_ripple_repository
         )
-        reset
+        pg_ripple_reset
         records
       end
 
@@ -262,6 +292,16 @@ module PgRipple
 
       private
 
+      # Resets this relation *and* the owner's preloaded copy of it.
+      #
+      # `alice.reports << bob` after a `graph_includes(:reports)` has to
+      # invalidate the array the preload handed the owner, or the next
+      # `alice.reports` answers from before the write.
+      def pg_ripple_reset
+        reset
+        pg_ripple_owner&.reset_graph_association(pg_ripple_association.name)
+      end
+
       # Asserts the edge to everything that got persisted.
       def pg_ripple_link(created)
         records = Array(created).select(&:persisted?)
@@ -280,7 +320,111 @@ module PgRipple
       end
     end
 
+    # Whether `graph_includes` has already filled this association in.
+    #
+    # @param name [Symbol]
+    # @return [Boolean]
+    def graph_association_loaded?(name)
+      pg_ripple_loaded_graph_associations.key?(name.to_sym)
+    end
+
+    # Hands one record its slice of a preload.
+    #
+    # @api private
+    # @param name [Symbol]
+    # @param records [Array<ActiveRecord::Base>]
+    # @return [Array<ActiveRecord::Base>]
+    def pg_ripple_graph_association_loaded(name, records)
+      pg_ripple_loaded_graph_associations[name.to_sym] = records.freeze
+    end
+
+    # Forgets a preloaded association, so the next read goes to the store.
+    #
+    # Called by `<<` and `#delete`: an edge written through a preloaded
+    # association would otherwise leave the owner answering from a cache that
+    # predates the write, which is the one thing a preload must never do.
+    #
+    # @param name [Symbol, nil] nil for all of them
+    # @return [void]
+    def reset_graph_association(name = nil)
+      if name.nil?
+        pg_ripple_loaded_graph_associations.clear
+      else
+        pg_ripple_loaded_graph_associations.delete(name.to_sym)
+      end
+    end
+
+    # Discards preloaded graph associations along with the row.
+    #
+    # @return [self]
+    def reload(...)
+      reset_graph_association
+      super
+    end
+
+    # Whether reading an un-preloaded graph association should raise.
+    #
+    # Both switches, the same way ActiveRecord reads its own: the global
+    # {PgRipple::Configuration#strict_loading} the README's initializer sets,
+    # and the per-record/per-relation `strict_loading` flag ActiveRecord
+    # already carries — `Person.strict_loading.find(1)` means the same thing
+    # about a graph association as it does about a `has_many`.
+    #
+    # @return [Boolean]
+    def pg_ripple_strict_loading?
+      return true if PgRipple.configuration.strict_loading
+      return false unless respond_to?(:strict_loading?)
+
+      strict_loading?
+    end
+
+    private
+
+    def pg_ripple_loaded_graph_associations
+      @pg_ripple_loaded_graph_associations ||= {}
+    end
+
+    # The reader `graph_has_many`/`graph_has_one` generates.
+    #
+    # Preloaded, it is the same relation object as ever with its records
+    # already in it (`ActiveRecord::Relation#load_records`), so
+    # `person.reports.map(&:name)` and `person.reports.size` query nothing
+    # while `person.reports.where(active: true)` still spawns and queries —
+    # exactly what a loaded `has_many` does.
+    def pg_ripple_read_graph_association(definition)
+      unless graph_association_loaded?(definition.name)
+        pg_ripple_strict_loading_violation!(definition) if pg_ripple_strict_loading?
+
+        relation = pg_ripple_graph_relation(definition)
+        return (definition.arity == :one) ? relation.first : relation
+      end
+
+      loaded = pg_ripple_loaded_graph_associations.fetch(definition.name)
+      return loaded.first if definition.arity == :one
+
+      pg_ripple_graph_relation(definition).pg_ripple_load_records(loaded.dup)
+    end
+
+    def pg_ripple_graph_relation(definition)
+      public_send(:"#{definition.name}_relation")
+    end
+
+    def pg_ripple_strict_loading_violation!(definition)
+      raise ActiveRecord::StrictLoadingViolationError,
+        "`#{self.class.name}##{definition.name}` is a graph association that was not preloaded. " \
+        "Load it with `graph_includes(:#{definition.name})`, or query it explicitly with " \
+        "`#{definition.name}_relation`."
+    end
+
     class_methods do
+      # `Person.graph_includes(:reports)` — the class-level entry point.
+      #
+      # @param names [Symbol]
+      # @return [ActiveRecord::Relation]
+      def graph_includes(*names)
+        all.graph_includes(*names)
+      end
+
       # @return [Hash{Symbol => PgRipple::Associations::Definition}]
       def graph_associations
         @graph_associations ||= superclass.respond_to?(:graph_associations) ? superclass.graph_associations.dup : {}
@@ -333,16 +477,16 @@ module PgRipple
         definition = Definition.new(name, owner: self, arity: arity, **options)
         graph_associations[definition.name] = definition
 
+        # Always a fresh, unloaded relation, even when the association has been
+        # preloaded and even under `strict_loading`. It is the documented way
+        # to say "query this one anyway", and a method whose whole purpose is
+        # to run the query cannot be the method that refuses to.
         generated_graph_association_methods.define_method(:"#{name}_relation") do
           definition.scope_for(self).tap { |relation| relation.pg_ripple_owner = self }
         end
 
-        if arity == :one
-          generated_graph_association_methods.define_method(name) do
-            public_send(:"#{name}_relation").first
-          end
-        else
-          generated_graph_association_methods.alias_method(name, :"#{name}_relation")
+        generated_graph_association_methods.define_method(name) do
+          pg_ripple_read_graph_association(definition)
         end
 
         definition
