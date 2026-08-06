@@ -1,4 +1,7 @@
 ignore:
+  # Reference checkouts are gitignored working material — other people's gems,
+  # held to other people's style. Linting them buries this gem's own offences.
+  - 'references/**/*'
   - 'spec/dummy/db/schema.rb'
   - 'spec/dummy/bin/**/*'
   - 'lib/generators/**/templates/**/*'

@@ -75,7 +75,7 @@ module PgRipple
       version = PgRipple.database.pg_ripple_version
 
       stream.puts
-      stream.puts("  # pg_ripple objects#{version ? ", dumped from pg_ripple #{version}" : ""}.")
+      stream.puts("  # pg_ripple objects#{", dumped from pg_ripple #{version}" if version}.")
     end
 
     # One-liners are dumped as a run with no blank line between them: a schema

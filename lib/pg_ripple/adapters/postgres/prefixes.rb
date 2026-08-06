@@ -44,7 +44,7 @@ module PgRipple
 
         # The query used to retrieve the prefixes considered dumpable into
         # `db/schema.rb`.
-        PREFIXES_QUERY = <<~SQL.freeze
+        PREFIXES_QUERY = <<~SQL
           SELECT
               prefix,
               expansion

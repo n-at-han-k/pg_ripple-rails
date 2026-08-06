@@ -1,0 +1,7 @@
+# frozen_string_literal: true
+
+class InstallPgRipple < ActiveRecord::Migration<%= migration_version %>
+  def change
+    enable_extension "pg_ripple"
+  end
+end

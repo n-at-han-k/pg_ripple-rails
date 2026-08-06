@@ -20,3 +20,9 @@ end
 
 gem "pry"
 gem "redcarpet"
+
+# Not a dependency of the gem, and deliberately so: it is here because the
+# README's central claim is that `alice.network.where(active: true)
+# .includes(:account).page(2)` works, and `.page` is Kaminari's. A claim about
+# a third-party gem is worth exactly as much as the test that runs it.
+gem "kaminari-activerecord"

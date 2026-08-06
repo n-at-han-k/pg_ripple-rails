@@ -1,0 +1,20 @@
+# frozen_string_literal: true
+
+PgRipple.configure do |c|
+  # Every subject this application mints hangs off this IRI, so the same row is
+  # the same subject in every environment only if every environment agrees on
+  # it. It is an identifier, not an address: nothing dereferences it.
+  c.base_uri = "https://app.example.com/"
+
+  # The named graph reads and writes are scoped to. nil = the default graph.
+  c.default_graph = nil
+
+  # When SHACL validation runs: :sync validates in the writing transaction, so
+  # an invalid triple fails the save. :async defers it; :off skips it.
+  c.validate = :sync
+
+  # Raise instead of walking the graph lazily. Worth more here than on a
+  # has_many: the query behind a property path is a whole SPARQL evaluation,
+  # and a + or * path is unbounded.
+  c.strict_loading = Rails.env.local?
+end

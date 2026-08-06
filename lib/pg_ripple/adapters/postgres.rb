@@ -446,8 +446,15 @@ module PgRipple
 
       attr_reader :connectable
 
+      # `#lease_connection` where it exists (Rails 7.2+), `#connection` where it
+      # does not. `ActiveRecord::Base.connection` is the deprecated permanent
+      # checkout, and an application with `permanent_connection_checkout =
+      # :disallowed` raises out of it rather than deprecating — which would
+      # make every migration in this gem unrunnable.
       def connection
-        PgRipple::Adapters::Postgres::Connection.new(connectable.connection)
+        raw = connectable.respond_to?(:lease_connection) ? connectable.lease_connection : connectable.connection
+
+        PgRipple::Adapters::Postgres::Connection.new(raw)
       end
 
       # Runs a statement with its arguments bound as parameters, discarding the
@@ -478,7 +485,7 @@ module PgRipple
         values.map.with_index(1) do |value, position|
           ActiveRecord::Relation::QueryAttribute.new(
             "$#{position}",
-            value.nil? ? nil : value.to_s,
+            value&.to_s,
             ActiveRecord::Type::Value.new
           )
         end

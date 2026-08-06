@@ -34,7 +34,7 @@ module PgRipple
         # the live catalog is the only reliable source. Undecoded, a dump would
         # emit `complexity: 3` and the next migration would fail. The same
         # CASE is what `list_endpoints()` applies internally.
-        ENDPOINTS_QUERY = <<~SQL.freeze
+        ENDPOINTS_QUERY = <<~SQL
           SELECT
               url,
               enabled,

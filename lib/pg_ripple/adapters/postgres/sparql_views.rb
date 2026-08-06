@@ -27,7 +27,7 @@ module PgRipple
       class SparqlViews
         # The query used to retrieve the views considered dumpable into
         # `db/schema.rb`.
-        SPARQL_VIEWS_QUERY = <<~SQL.freeze
+        SPARQL_VIEWS_QUERY = <<~SQL
           SELECT
               name,
               sparql,

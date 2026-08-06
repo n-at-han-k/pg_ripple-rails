@@ -186,10 +186,15 @@ A path is a value — build it at runtime, invert it, pass it around.
 
 ```ruby
 path = ~ex.worksAt / ex.worksAt
-path.inverse
+path.inverse     # "^(^ex:worksAt/ex:worksAt)"
 path.to_s        # "^ex:worksAt/ex:worksAt"
 path.to_term     # #<RDF::URI> when the path is a single predicate
 ```
+
+> **Corrected.** `#inverse` parenthesises what it inverts. SPARQL's
+> `PathEltOrInverse ::= '^'? PathPrimary PathMod?` carries at most one `^`, so the
+> flat `^^ex:manages` is a syntax error rather than a double inverse. See
+> [`docs/spec-corrections.md` §14](docs/spec-corrections.md).
 
 Paths are [StringBuilder](https://github.com/general-intelligence-systems/string_builder)
 chains with a SPARQL-path concat handler. The chain is the data, the handler decides how
@@ -242,9 +247,15 @@ Writes go through the graph, reads come back as models:
 ```ruby
 alice.friends << bob          # INSERT DATA { <alice> foaf:knows <bob> }
 alice.friends.delete(bob)     # DELETE DATA { <alice> foaf:knows <bob> }
+alice.friends.create!(name: "Bob")  # INSERT the row, then INSERT DATA the edge
 alice.reports.pluck(:name)    # ordinary AR pluck
 alice.network.count           # COUNT(*) over the lateral join
 ```
+
+`#build` and `#new` raise. A graph edge is a triple between two subject IRIs and an
+unsaved record has neither an IRI nor a foreign key to hold one, so there is nothing an
+unsaved `build` could link — see
+[`docs/spec-corrections.md` §14](docs/spec-corrections.md).
 
 ---
 
@@ -308,6 +319,32 @@ Person.graph.where(role: "engineer").to_sparql
 Person.graph.where(role: "engineer").to_sql
 Person.graph.where(role: "engineer").explain    # pg_ripple.explain_sparql()
 ```
+
+`#limit` and `#offset` are the two methods `.graph` does not simply forward to the
+relation. `pg_ripple.sparql()` builds every solution before PostgreSQL sees the first
+one, so an outer bound truncates finished work — 40× on a 25 921-solution traversal. When
+nothing downstream of the join can drop a row, the bound goes into the query instead, and
+the query is ordered so that paging it is repeatable:
+
+```ruby
+Person.graph.where(role: "engineer").limit(20).offset(20).to_sparql
+```
+```sparql
+PREFIX ex: <https://app.example.com/ns#>
+SELECT DISTINCT ?iri
+WHERE {
+  ?iri a <http://xmlns.com/foaf/0.1/Person> .
+  ?iri ex:role "engineer" .
+}
+ORDER BY ?iri
+LIMIT 20
+OFFSET 20
+```
+
+The `OFFSET` then comes *off* the SQL: the lateral has already skipped those solutions,
+and applying it twice returns an empty page. Add a `WHERE` on a column, an `ORDER BY`, a
+join or an `includes` and the bound stays in SQL, because any of those can drop a row the
+truncated traversal was counting on. An association's `#limit` is never pushed down.
 
 Large result sets stream through `pg_ripple.sparql_cursor()`, so peak memory is bounded
 by `pg_ripple.export_batch_size` rather than the result set:
@@ -890,11 +927,33 @@ require "pg_ripple/rspec"
 
 RSpec.configure do |c|
   c.include PgRipple::TestHelpers
+
+  # Required under use_transactional_tests. See below.
+  c.before(:each) { PgRipple::TestHelpers.reset_dictionary_cache! }
 end
 ```
 
-Triples roll back with the transactional fixture — same connection, so nothing extra to
-clean up.
+Triples roll back with the transactional fixture — same connection, so there is no store
+to truncate.
+
+> **Corrected: there is one thing to clean up, and it is not the data.** A rolled-back
+> transaction poisons pg_ripple 0.128.0's per-backend dictionary cache. The cache maps
+> terms to dictionary ids; `ROLLBACK` removes the dictionary rows and leaves the cache
+> holding their ids, so the *next* example on that connection writes triples against ids
+> that no longer exist and every query for those terms returns nothing — silently, and
+> only for the terms the rolled-back example was the first to use, which is what makes it
+> look like a flaky test. Three rolled-back rounds of insert-then-query on one connection
+> return 1, 0, 0; with a reconnect between them, 1, 1, 1. `reset_dictionary_cache!` drops
+> the pool's connections, which is the only way to clear it. See
+> [`docs/spec-corrections.md` §11](docs/spec-corrections.md).
+
+Two smaller things about the examples below. `raise ActiveRecord::Rollback` needs
+`transaction(requires_new: true)` inside a transactional suite, or Rails swallows it and
+rolls nothing back — that is the Rails rule the "Transactions" section nine sections up
+does not have to worry about. And `change_triples` counts the writes on the wire, through
+an `ActiveSupport::Notifications` event, rather than diffing the store before and after:
+a whole-object rewrite and a minimal diff leave the store in identical states, so a
+before/after count could not tell apart the one thing this example exists to test.
 
 ```ruby
 it "derives the management chain" do

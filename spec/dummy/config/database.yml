@@ -1,0 +1,13 @@
+# The dummy app has no database of its own: it connects to whatever
+# PG_RIPPLE_TEST_URL names, which is the same connection the rest of the suite
+# uses. One connection is the premise of the whole gem — rows and triples roll
+# back together only because there is nowhere else for either to go.
+default: &default
+  adapter: postgresql
+  url: <%= ENV["PG_RIPPLE_TEST_URL"] %>
+
+test:
+  <<: *default
+
+development:
+  <<: *default

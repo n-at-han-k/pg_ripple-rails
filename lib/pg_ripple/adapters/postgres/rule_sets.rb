@@ -34,7 +34,7 @@ module PgRipple
         # Newline-joined because `load_rules` accepts a whitespace-separated
         # program and a rule already ends in " ." — see the Datalog syntax note
         # in docs/probe-results.md §0.
-        RULE_SETS_WITH_RULES_QUERY = <<~SQL.freeze
+        RULE_SETS_WITH_RULES_QUERY = <<~SQL
           SELECT
               rs.name,
               rs.active,

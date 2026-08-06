@@ -29,7 +29,7 @@ module PgRipple
       # @api private
       class Shapes
         # The query used to retrieve the shapes described in `db/schema.rb`.
-        SHAPES_QUERY = <<~SQL.freeze
+        SHAPES_QUERY = <<~SQL
           SELECT
               shape_iri,
               active,
