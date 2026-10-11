@@ -1,16 +1,16 @@
 # frozen_string_literal: true
 
-lib = File.expand_path("lib", __dir__)
-$LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
-require "pg_ripple/version"
+# kettle-jem:freeze
+# To retain chunks of comments & code during kettle-jem templating:
+# Wrap custom sections with freeze markers (e.g., as above and below this comment chunk).
+# kettle-jem will then preserve content between those markers across template runs.
+# kettle-jem:unfreeze
 
 Gem::Specification.new do |spec|
   spec.name = "pg_ripple-rails"
-  spec.version = PgRipple::VERSION
+  spec.version = Module.new.tap { |mod| Kernel.load("#{__dir__}/lib/pg_ripple/version.rb", mod) }::PgRipple::Version::VERSION
   spec.authors = ["Nathan Kidd"]
   spec.email = ["nathankidd@hey.com"]
-  spec.license = "MIT"
-  spec.required_ruby_version = ">= 3.2"
 
   spec.summary = "pg_ripple knowledge graphs for Rails: models, migrations and SPARQL"
   spec.description = <<~DESCRIPTION
@@ -21,55 +21,149 @@ Gem::Specification.new do |spec|
     sets, SPARQL views and federation endpoints.
   DESCRIPTION
   spec.homepage = "https://github.com/n-at-han-k/pg_ripple-rails"
-  spec.metadata = {
-    "bug_tracker_uri" => "#{spec.homepage}/issues",
-    "changelog_uri" => "#{spec.homepage}/blob/v#{spec.version}/CHANGELOG.md",
-    "homepage_uri" => spec.homepage,
-    "source_code_uri" => spec.homepage
-  }
+  spec.licenses = ["MIT"]
+  spec.required_ruby_version = ">= 3.2"
 
-  spec.files = `git ls-files -z`.split("\x0").reject do |f|
-    f == File.basename(__FILE__) || f.start_with?("spec/", "references/", ".github/")
+  # Linux distros often package gems and securely certify them independent
+  #   of the official RubyGem certification process. Allowed via ENV["SKIP_GEM_SIGNING"]
+  # Hence, only enable signing if `SKIP_GEM_SIGNING` is not set in ENV.
+  # See CONTRIBUTING.md
+  unless ENV.include?("SKIP_GEM_SIGNING")
+    user_cert = "certs/#{ENV.fetch("GEM_CERT_USER", ENV["USER"])}.pem"
+    cert_file_path = File.join(__dir__, user_cert)
+    cert_chain = cert_file_path.split(",")
+    cert_chain.select! { |fp| File.exist?(fp) }
+    if cert_file_path && cert_chain.any?
+      spec.cert_chain = cert_chain
+      if $PROGRAM_NAME.end_with?("gem") && ARGV[0] == "build"
+        spec.signing_key = File.join(Gem.user_home, ".ssh", "gem-private_key.pem")
+      end
+    end
   end
+
+  spec.metadata["homepage_uri"] = "https://github.com/n-at-han-k/pg_ripple-rails"
+  spec.metadata["source_code_uri"] = "#{spec.homepage}/tree/v#{spec.version}"
+  spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/v#{spec.version}/CHANGELOG.md"
+  spec.metadata["bug_tracker_uri"] = "#{spec.homepage}/issues"
+  spec.metadata["documentation_uri"] = "https://www.rubydoc.info/gems/#{spec.name}/#{spec.version}"
+  spec.metadata["funding_uri"] = "https://github.com/sponsors/n-at-han-k"
+  spec.metadata["wiki_uri"] = "#{spec.homepage}/wiki"
+  spec.metadata["news_uri"] = "https://www.railsbling.com/tags/#{spec.name}"
+  spec.metadata["discord_uri"] = "https://discord.gg/3qme4XHNKN"
+  spec.metadata["mailing_list_uri"] = "https://www.rubyforum.org/tag/pg_ripple-rails"
+  spec.metadata["rubygems_mfa_required"] = "true"
+
+  gemspec_root = __dir__
+  relative_package_path = lambda do |path|
+    path.delete_prefix("#{gemspec_root}/")
+  end
+  enumerate_package_glob = lambda do |glob|
+    Dir.glob(glob, File::FNM_DOTMATCH).filter_map do |path|
+      next unless File.file?(path) && ![".", ".."].include?(File.basename(path))
+
+      relative_package_path.call(path)
+    end
+  end
+  enumerate_package_files = lambda do |root|
+    enumerate_package_glob.call(File.join(gemspec_root, root, "**", "*"))
+  end
+  package_metadata_files = %w[
+    CHANGELOG.md
+    LICENSE.md
+    README.md
+    sig/pg_ripple/rails.rbs
+  ].select { |path| File.exist?(File.join(gemspec_root, path)) }
+
+  # Specify which files are part of the released package.
+  spec.files = [
+    # Root package metadata
+    *package_metadata_files,
+    # Code / tasks / data (NOTE: exe/ is specified via spec.bindir and spec.executables below)
+    *enumerate_package_files.call("lib"),
+    # Executables and executable support scripts
+    *enumerate_package_files.call("exe"),
+    # Extra package files configured by .structuredmerge/kettle-jem.yml
+    *enumerate_package_glob.call(File.join(gemspec_root, "data/**/*"))
+  ]
+  spec.rdoc_options += [
+    "--title",
+    "#{spec.name} - #{spec.summary}",
+    "--main",
+    "README.md",
+    "--exclude",
+    "^sig/",
+    "--line-numbers",
+    "--inline-source",
+    "--quiet"
+  ]
+  spec.bindir = "exe"
+  # Listed files are the relative paths from bindir above.
+  spec.executables = []
   spec.require_paths = ["lib"]
 
+  # Utilities
+  spec.add_dependency "active-triples", "~> 1.2", ">= 1.2.0"
   spec.add_dependency "activerecord", ">= 7.1"
   spec.add_dependency "activesupport", ">= 7.1"
   spec.add_dependency "railties", ">= 7.1"
-
-  # The graph half of the gem. Each is pinned to the exact version the design
-  # was verified against and left open to the rest of its compatible series:
-  # `~>` alone would allow an older patch than the one the behaviour was read
-  # from, and an `=` pin would fight every host application's lockfile.
-  #
-  # rdf            terms, Repository, the N-Triples reader/writer that decodes
-  #                every binding pg_ripple.sparql() hands back.
-  # active-triples RDFSource and the `property` DSL behind PgRipple::Node.
-  #                Its own floors are permissive — activemodel >= 3.0.0,
-  #                ruby >= 2.1 — so it does not hold Rails back
-  #                (docs/spec-corrections.md §6).
-  # sparql         the READ side: parse, #variables, Operator#rewrite. Not
-  #                sparql-client, whose Queryable mode evaluates the algebra in
-  #                Ruby one pattern at a time and bypasses the extension.
-  # string_builder the WRITE side: property paths, Datalog, Turtle.
   spec.add_dependency "rdf", "~> 3.3", ">= 3.3.4"
-  spec.add_dependency "active-triples", "~> 1.2", ">= 1.2.0"
   spec.add_dependency "sparql", "~> 3.3", ">= 3.3.2"
   spec.add_dependency "string_builder", "~> 1.2", ">= 1.2.4"
 
+  # NOTE: It is preferable to list development dependencies in the gemspec due to increased
+  #       visibility and discoverability.
+  #       However, development dependencies in gemspec will install on
+  #       all versions of Ruby that will run in CI.
+  #       This gem, and its gemspec runtime dependencies, will install on Ruby down to 3.2.
+  #       This gem, and its gemspec development dependencies, will install on Ruby down to 3.2.
+  #       Thus, dev dependencies in gemspec must have
+  #
+  #       required_ruby_version ">= 3.2" (or lower)
+  #
+  #       Development dependencies that require strictly newer Ruby versions should be in a "gemfile",
+  #       and preferably a modular one (see gemfiles/modular/*.gemfile).
+
+  # Dev, Test, & Release Tasks
+  spec.add_development_dependency("kettle-dev", "~> 3.1", ">= 3.1.0")             # ruby >= 3.2
+
+  # Security
+  spec.add_development_dependency("bundler-audit", "~> 0.9.3")                      # ruby >= 2.0.0
+
+  # Tasks
+  spec.add_development_dependency("rake", "~> 13.0")                                # ruby >= 2.2.0
+
+  # Debugging
+  spec.add_development_dependency("require_bench", "~> 1.0", ">= 1.0.4")            # ruby >= 2.2.0
+
+  # Testing
+  # Loads version files in anonymous namespaces for coverage without constant redefinition warnings.
+  spec.add_development_dependency("anonymous_loader", "~> 0.1", ">= 0.1.3")         # ruby >= 2.2.0
+  spec.add_development_dependency("appraisal2", "~> 3.2", ">= 3.2.3")               # ruby >= 1.8.7, for testing against multiple versions of dependencies
+  spec.add_development_dependency("kettle-test", "~> 2.0", ">= 2.0.21")            # ruby >= 3.2
+  spec.add_development_dependency("turbo_tests2", "~> 3.2", ">= 3.2.7")           # ruby >= 2.4.0, default kettle-test runner
+
+  # Releasing
+  spec.add_development_dependency("ruby-progressbar", "~> 1.13")                    # ruby >= 0
+  spec.add_development_dependency("stone_checksums", "~> 1.0", ">= 1.0.8")          # ruby >= 2.2.0
+
+  # Development tasks
+  # The cake is a lie. erb v2.2, the oldest release, was never compatible with Ruby 2.3.
+  # This means we have no choice but to use the erb that shipped with Ruby 2.3
+  # /opt/hostedtoolcache/Ruby/2.3.8/x64/lib/ruby/gems/2.3.0/gems/erb-2.2.2/lib/erb.rb:670:in `prepare_trim_mode': undefined method `match?' for "-":String (NoMethodError)
+  # spec.add_development_dependency("erb", ">= 2.2")                                  # ruby >= 2.3.0, not SemVer, old rubies get dropped in a patch.
+  spec.add_development_dependency("gitmoji-regex", "~> 2.0", ">= 2.0.12")            # ruby >= 2.4
+
+  # HTTP recording for deterministic specs
+  # In Ruby 3.5 (HEAD) the CGI library has been pared down, so we also need to depend on gem "cgi" for ruby@head
+  # This is done in the "head" appraisal.
+  # See: https://github.com/vcr/vcr/issues/1057
+  # spec.add_development_dependency("vcr", ">= 4")                        # 6.0 claims to support ruby >= 2.3, but fails on ruby 2.4
+  # spec.add_development_dependency("webmock", ">= 3")                    # Last version to support ruby >= 2.3
   spec.add_development_dependency "bundler"
   spec.add_development_dependency "pg"
-  spec.add_development_dependency "rake", "~> 13.0"
   spec.add_development_dependency "rspec-rails"
   spec.add_development_dependency "standard"
   spec.add_development_dependency "yard"
-
-  # Not runtime dependencies. F(x) and pg_cron are mixed into the SAME object as
-  # this gem — ActiveRecord::ConnectionAdapters::AbstractAdapter — so "do we
-  # collide with them?" is a question only answerable with both installed. See
-  # WORKFLOW.md section 2 and spec/pg_ripple/coexistence_spec.rb, which exists
-  # because pg_cron once shadowed F(x)'s private resolve_sql_definition and
-  # broke every create_function in any app running both.
   spec.add_development_dependency "fx"
   spec.add_development_dependency "pg_cron"
 end
