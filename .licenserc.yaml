@@ -1,0 +1,8 @@
+header:
+  license:
+    spdx-id: "MIT"
+
+dependency:
+  files:
+    - Gemfile.lock
+

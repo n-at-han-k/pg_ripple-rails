@@ -1,0 +1,10 @@
+# These are supported funding model platforms
+
+buy_me_a_coffee: ""
+community_bridge: # Replace with a single Community Bridge project-name e.g., cloud-foundry
+github: ["n-at-han-k"] # Replace with up to 4 GitHub Sponsors-enabled usernames e.g., [user1, user2]
+ko_fi: "" # Replace with a single Ko-fi username
+liberapay: "" # Replace with a single Liberapay username
+open_collective: # Replace with a single Open Collective slug e.g., orgs/cloud-foundry
+thanks_dev: u/gh/n-at-han-k
+tidelift: rubygems/pg_ripple-rails

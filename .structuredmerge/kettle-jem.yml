@@ -1,0 +1,473 @@
+# kettle-jem configuration for one of n-at-han-k's Ruby gems.
+#
+# converge-ruby-gems.yml seeds this to <repo>/.structuredmerge/kettle-jem.yml,
+# substituting MIT with the repo's SPDX licence and 3.2 with
+# its gemspec's required_ruby_version.
+#
+# RULE: set every key EXPLICITLY. kettle-jem's config_sync phase merges the
+# packaged template config into this file on every run, and any key we omit is
+# re-seeded with the template author's own value — including licences, funding
+# handles, social handles and a personal ORCID. Omission is not neutral.
+
+# Deliberately empty, and required to be present. A non-empty emoji makes
+# kettle-jem rewrite the README H1 to "<emoji> <gem> / <Namespace>", throwing
+# away the project's handwritten title.
+project_emoji: ""
+
+# No alias table. Omitted, this is seeded with the template author's own
+# identities (pboling/galtzo/Aboling0 -> named individuals).
+author_aliases:
+  pboling: "Peter H. Boling"
+  "|7eter l-|. l3oling": "Peter H. Boling"
+  "Peter Boling": "Peter H. Boling"
+  galtzo: "Peter H. Boling"
+  Aboling0: "Annibelle Boling"
+# Direct dependency ownership decisions.
+# On first templating, kettle-jem discovers dependencies declared directly by
+# Gemfile/gemspec and also by modular Gemfiles, and writes them here for review.
+# Resolve each entry by choosing one supported action, then add a reason.
+#
+# Every entry must include gem, direct, modular, action, and reason:
+# dependency_conflicts:
+#   resolve:
+#     - gem: yard-relative_markdown_links
+#       direct: shields-badge.gemspec
+#       modular: gemfiles/modular/documentation.gemfile
+#       action: remove_modular_gem
+#       reason: "The gemspec owns the project's documentation integration."
+# Supported actions (the destination project must explicitly choose one):
+#   remove_modular_gem       - remove the modular Gemfile's direct gem call.
+#   remove_x_std_lib_eval    - remove x_std_libs eval references for the gem.
+#   keep_both                - retain both declarations when their requirements
+#                              overlap. This is intended for a broad direct
+#                              requirement narrowed by framework/engine Gemfiles;
+#                              incompatible ranges remain an error.
+dependency_conflicts:
+  # Review each entry and choose a supported action.
+  # keep_both is for a broad direct requirement plus a compatible modular narrowing.
+  reviewed: false
+  resolve:
+    - gem: standard
+      direct: pg_ripple-rails.gemspec
+      modular: gemfiles/modular/style.gemfile
+      action: review
+      reason: ""
+    - gem: yard
+      direct: pg_ripple-rails.gemspec
+      modular: gemfiles/modular/documentation.gemfile
+      action: review
+      reason: ""
+# MRI only. Nothing here is tested on JRuby or TruffleRuby, so their
+# workflows and badges are pruned rather than added and left failing.
+engines:
+  - ruby
+
+# Ruby version policy.
+ruby:
+  # Lowest MRI Ruby version for generated CI workflows, Appraisals, and
+  # test/development dependency assumptions. This is intentionally separate
+  # from the gemspec required_ruby_version, which describes the published
+  # runtime contract. Effective CI minimum is max(gemspec minimum, this value).
+  test_minimum: "3.2"
+
+# RubyGems packaging/runtime shape.
+rubygems:
+  # Published runtime Ruby floor used for generated gemspec metadata and README
+  # compatibility text. Omit this to derive the value from the gemspec.
+  # ENV override: KJ_MIN_RUBY
+  min_ruby: ">= 3.2"
+  # Never inject `require "version_gem"` into an entrypoint: these gems
+  # declare their own version constant and several are C extensions.
+  version_gem_entrypoint: disabled
+
+gemspec:
+  package_files:
+    include:
+      - data/**/*
+
+# MUST be explicit. Omitted, config_sync injects `licenses: [MIT]` and the next
+# run rewrites the gemspec to MIT and writes MIT.md into a repo licensed
+# otherwise — Apache-2.0 and LGPL-2.1 are both in use here.
+licenses:
+  - "MIT"
+
+funding:
+  open_collective: false
+
+# RubyGems package manifest additions.
+# The generated gemspec owns the default package manifest. Add entries here only
+# for package/runtime files that are not covered by the template default.
+#
+# Example:
+# gemspec:
+#   package_files:
+#     include:
+#       - data/**/*.json
+
+# Repository URL topology.
+# This is independent from templates.profile. A gem may use the full template
+# while still living as a sub-project inside a monorepo.
+#
+# Supported values:
+#   standalone          - project URLs point at this gem's own repository
+#   monorepo-subproject - project URLs point at a subdirectory in the repository root
+#
+# ENV override: KJ_REPOSITORY_TOPOLOGY
+repository:
+  topology: standalone
+
+# RubyForum community tag.
+# The project tag is used when present; otherwise the family tag is used.
+# kettle-family or family-level mise config can set the family tag during
+# templating so the value is written into each project config for standalone
+# checkouts.
+rubyforum:
+  # ENV override: KJ_RUBYFORUM_FAMILY_TAG
+  family_tag: ""
+  # ENV override: KJ_RUBYFORUM_PROJECT_TAG
+  project_tag: ""
+
+# Framework matrix workflows.
+# When your gem tests against multiple versions of a framework (Rails,
+# ActiveRecord, ActiveSupport, etc.), this section configures how
+# kettle-jem generates the CI matrix strategy and gemfile references.
+#
+# preset: controls overall workflow strategy
+#   modern       — Ruby-only matrix (default when absent)
+#   framework    — Ruby × framework-version matrix
+#   legacy-compat — supported / unsupported / ancient workflow split
+#
+# framework_matrix (only used when preset: framework):
+#   dimension   — framework name used in the matrix key and display
+#                 (e.g. activerecord, rails, actionmailer)
+#   gem         — gem name to write into generated framework gemfiles.
+#                 Defaults to dimension when absent.
+#   versions    — ordered list of versions to test against. Entries may be
+#                 strings, or mappings with:
+#                   label       - display value used in CI
+#                   slug        - path-safe value used in gemfile_pattern
+#                   requirement - Bundler requirement written to the gemfile
+#                   default     - true for the one generated framework
+#                                 gemfile loaded by the root Gemfile for local
+#                                 `bundle exec kettle-test` commands
+#                   replaces    - direct root Gemfile dependencies replaced by
+#                                 the default framework gemfile
+#   gemfile_pattern — pattern for gemfile paths; {version} is replaced
+#                     with each version slug (dots replaced by underscores
+#                     when the pattern contains an underscore placeholder).
+#                     Resolved relative to gemfiles/ unless it already contains
+#                     a directory.
+#                     Examples:
+#                       "ar-{version}.x"      → gemfiles/ar-7.0.x
+#                       "rails_{version}"      → gemfiles/rails_7_0.gemfile
+#   Use this when you need a simple 2D matrix: Ruby × one framework gem/version axis.
+#   For deeper or more complex matrices that are better modeled as Appraisals entries,
+#   prefer the kettle-jem-appraisals plugin instead. Its appraisal_matrix config
+#   controls generated Appraisals and CI strategy; pair it with test_bundle below
+#   when the root local Gemfile needs a stable framework or harness.
+#
+workflows:
+  # Default command used by generated test workflows.
+  # ENV override: KJ_EXEC_CMD
+  exec_cmd: rake
+  # Include VCR/WebMock recording modular gemfiles in generated Appraisals.
+  # Enable only for projects that actually require recording support.
+  recording: false
+
+  # preset: framework
+  # framework_matrix:
+  #   dimension: activerecord
+  #   gem: activerecord
+  #   versions:
+  #     - "7.0"
+  #     - "7.1"
+  #     - "7.2"
+  #     - label: "8.0+"
+  #       slug: "8_0_plus"
+  #       requirement: ">= 8.0"
+  #   gemfile_pattern: "ar-{version}.x"
+
+# Appraisal matrices are owned by the kettle-jem-appraisals plugin. It uses
+# appraisal_matrix.mode, freshness_ttl, exec_cmd, appraisal_gemfiles,
+# standard_appraisal_role, and gems.tier1 / gems.tier2 to generate the full
+# Appraisals and CI matrix. It does not implicitly select the root local bundle;
+# configure test_bundle below for that purpose.
+
+# Default local test bundle.
+# The root Gemfile is used by local bundle commands and is separate from
+# Appraisals and CI, which use their own generated Gemfiles. Declare the
+# project-specific test stack here instead of preserving it with freeze markers.
+#
+# gemfiles accepts either a path string or a mapping. `replaces` removes direct
+# root Gemfile declarations that are supplied by the modular fragment.
+# gems adds a direct declaration when a modular fragment is not warranted.
+#
+# test_bundle:
+#   gemfiles:
+#     - path: gemfiles/rails_7_2.gemfile
+#       replaces:
+#         - combustion
+#         - actionmailer
+#         - railties
+#   gems:
+#     - name: activerecord
+#       requirement: "~> 7.2"
+#     - name: debug
+#       requirement: "~> 1.11"
+#       require: false
+
+# Project-level third-party integrations.
+# Disabling an integration removes its upload/check action, suppresses its
+# README badges, skips templating its packaged config/workflow, and cleans up
+# matching config files or workflows if they already exist.
+#
+# Supported coverage integrations: codecov, coveralls, qlty
+# Supported license-check integration: skywalking-eyes
+# skywalking-eyes defaults to disabled unless the configured licenses include
+# MIT. Set `skywalking-eyes: true` to opt in for other license sets.
+#
+# Examples:
+# integrations:
+#   qlty: false
+#   skywalking-eyes: false
+#   disabled:
+#     - codecov
+#     - coveralls
+
+# README top logos.
+# Comma-separated list of optional logo entries for the generated README header.
+# top_logos render above the title; h2_synopsis_logos render inline with the Synopsis H2.
+# Supported values: related-org, ruby, org, project, optionally followed by |width.
+# Examples: org|12%, ruby|96px
+# Default widths: top 1 logo => 14%, top 2 logos => 12%, Synopsis 1 logo => 10%, Synopsis 2 logos => 8%.
+# Default (when keys are absent): top_logos: org,project; h2_synopsis_logos: related-org,ruby
+# Legacy top_logo_mode values map as:
+#   org => related-org,ruby,org
+#   project => related-org,ruby,project
+#   org_and_project => related-org,ruby,org,project
+readme:
+  top_logos: org
+  h2_synopsis_logos: ""
+  # Optional corporate sponsor logos shown near the top of the generated README.
+  # These entries are template-managed and render a compact logo row that links
+  # down to the generated FLOSS Funding section. Configure project-specific
+  # sponsors here; configure family-wide sponsors in kettle-family's config.
+  #
+  # corporate_sponsors:
+  #   - name: Example Corp
+  #     url: https://example.com
+  #     img_src: https://example.com/logo.svg
+  # Optional package-family README block.
+  # Supported values: structuredmerge
+  # Leave unset for standalone kettle-rb gems and most projects.
+  # package_family: structuredmerge
+  # Sections to preserve from the destination README during template merging.
+  # These section headings (case-insensitive) will keep the destination body
+  # instead of being overwritten by the template. Default when absent:
+  #   - synopsis
+  #   - configuration
+  #   - basic usage
+  #
+  # Built-in aliases (destination → template):
+  #   summary → synopsis, usage → basic usage,
+  #   configuration options → configuration, setup → basic usage
+  #
+  # preserve_sections:
+  #   - synopsis
+  #   - configuration
+  #   - basic usage
+  #   - usage
+  #   - summary
+  #
+  # Glob patterns for additional sections to preserve (e.g. Note:* headings).
+  # Default when absent: ["note:*"]
+  #
+  # preserve_patterns:
+  #   - "note:*"
+  #   - "setup*"
+  #
+  # Custom section aliases (destination heading → canonical template heading).
+  # Merged with built-in aliases above.
+  #
+  # section_aliases:
+  #   howto: basic usage
+  #   options: configuration
+  # README badges managed by the template.
+  badges:
+    # FOSSA license/security status badge.
+    # false - omit the badge (default)
+    # true  - derive project id from the GitHub repository slug
+    # string or mapping project/project_id/slug - explicit FOSSA project id
+    #
+    # Example:
+    # fossa: git+github.com/pboling/example
+    fossa: false
+
+# Apache SkyWalking Eyes dependency license overrides.
+# Use these when license-eye cannot identify a dependency license from the
+# package metadata or gem contents. Entries render under
+# dependency.licenses in .licenserc.yaml.
+#
+# Supported fields:
+#   name    - dependency name exactly as reported by license-eye
+#   license - SPDX license identifier to assign
+#   version - optional dependency version for a narrower override
+license_eye:
+  dependency_licenses: []
+
+# Machine / automation accounts to exclude from generated copyright output.
+#
+# When kettle-jem collects copyright information via `git blame`, it filters
+# out identities containing "[bot]" automatically. Use this list to also
+# exclude internal automation accounts that do not use that naming convention.
+#
+# Each entry is matched case-insensitively against the commit author name AND
+# the commit author email, so you can list either form. Project entries extend
+# the built-in defaults below; they do not remove those defaults.
+#
+# Built-in defaults always include: ["autobolt", "StepSecurity Bot",
+#   "dependabot[bot]", "depfu[bot]"]
+machine_users:
+  - github-actions[bot]
+
+# Self-test / templating CI threshold.
+# Set to a number from 0 to 100 to fail `rake kettle:jem:selftest` once
+# divergence exceeds that percent. Leave blank to report only.
+# Divergence is currently measured as the percent of produced files that would
+# change or be added during templating (100 - unchanged-file score).
+# ENV override: KJ_MIN_DIVERGENCE_THRESHOLD
+min_divergence_threshold: ""
+# Hostname used for generated YARD documentation links.
+# Defaults to <gem-name>.<author-email-domain>.
+# ENV override: KJ_YARD_HOST
+yard_host: "pg-ripple-rails.github.com"
+# Full URL used for gemspec metadata["homepage_uri"].
+# Defaults to https://pg-ripple-rails.github.com.
+# ENV override: KJ_HOMEPAGE_URI
+homepage_uri: "https://github.com/n-at-han-k/pg_ripple-rails"
+
+# Template source inventory.
+# The packaged inventory is the canonical kettle-jem project template. It
+# includes the detailed GitHub Actions workflow set, modular gemfiles,
+# README badges, license files, config files, and support scripts.
+templates:
+  root: packaged
+  apply: true
+  # Template recipe profile.
+  # Supported values:
+  #   full            - full gem template
+  #   monorepo-subgem - smaller sub-project template
+  #   monorepo-root   - repository-root support template
+  #
+  # ENV override: KETTLE_JEM_TEMPLATE_PROFILE
+  profile: full
+
+# Semantic diff drivers need smorg-rb on PATH, which needs Ruby 4; these
+# projects pin older Rubies in their own dev shells.
+git_drivers: none
+
+# No plugins. Omitted, this is seeded with `kettle-drift`.
+plugins: []
+
+# Default merge options
+defaults:
+  preference: template
+  add_template_only_nodes: true
+  freeze_token: kettle-jem
+
+# Every token the template fills with its author's own handles. Each must be
+# present, or config_sync re-seeds the author's value.
+tokens:
+  forge:
+    gh_user: "n-at-han-k"     # GitHub username only, no @, no URL. Used for GitHub Sponsors and profile links. ENV: KJ_GH_USER
+    gl_user: ""               # GitLab username only, no @, no URL. Used for profile links. ENV: KJ_GL_USER
+    cb_user: ""               # Codeberg username only, no @, no URL. Used for profile links. ENV: KJ_CB_USER
+    sh_user: ""              # SourceHut username only, no leading ~, no URL. Used as https://sr.ht/~<value>/. ENV: KJ_SH_USER
+  author:
+    name: "Nathan K"                        # Full display name. Example: Ada Lovelace. ENV: KJ_AUTHOR_NAME. Auto-seeded from gemspec authors.first; AUTHOR:NAMES preserves existing gemspec authors and appends Git-derived copyright holders.
+    given_names: "Nathan"     # Given/personal names only. Example: Ada. ENV: KJ_AUTHOR_GIVEN_NAMES. Auto-seeded when AUTHOR:NAME can be split
+    family_names: "K"      # Family/surname only. Example: Lovelace. ENV: KJ_AUTHOR_FAMILY_NAMES. Auto-seeded when AUTHOR:NAME can be split
+    email: "nathanblenheimkidd@gmail.com"   # Primary public email address. Example: floss@galtzo.com. ENV: KJ_AUTHOR_EMAIL. Auto-seeded from gemspec email.first
+    domain: "github.com"             # Bare domain only, no scheme, no email. Example: galtzo.com. ENV: KJ_AUTHOR_DOMAIN. Auto-seeded from AUTHOR:EMAIL
+    orcid: ""                                                   # ORCID identifier only, not the full URL. Example: 0000-0001-2345-6789. ENV: KJ_AUTHOR_ORCID
+  funding:
+    open_collective: false          # Open Collective slug, true to enable with ENV/.opencollective.yml, false to disable. ENV: OPENCOLLECTIVE_HANDLE or FUNDING_ORG
+    kofi: ""                  # Ko-fi handle/slug only. Used as https://ko-fi.com/<value>. ENV: KJ_FUNDING_KOFI
+    paypal: ""                    # PayPal.Me slug only. Used as https://www.paypal.com/paypalme/<value>. ENV: KJ_FUNDING_PAYPAL
+    buymeacoffee: ""          # Buy Me a Coffee slug only. Used as https://www.buymeacoffee.com/<value>. ENV: KJ_FUNDING_BUYMEACOFFEE
+    liberapay: ""             # Liberapay account slug only. Used as https://liberapay.com/<value>/donate. ENV: KJ_FUNDING_LIBERAPAY
+  social:
+    mastodon: ""             # Local handle only for the instance assumed by the template link. Current template uses https://ruby.social/@<value>. ENV: KJ_SOCIAL_MASTODON
+    bluesky: ""                  # Full Bluesky handle. Example: peterboling.dev or alice.bsky.social. Used as https://bsky.app/profile/<value>. ENV: KJ_SOCIAL_BLUESKY
+    linktree: ""             # Linktree username only. Used as https://linktr.ee/<value>. ENV: KJ_SOCIAL_LINKTREE
+    devto: ""                # DEV Community username only. Used as https://dev.to/<value>. ENV: KJ_SOCIAL_DEVTO
+
+# Glob patterns evaluated in order (first match wins)
+patterns:
+  # The packaged template raw_copies the template author's own public signing
+  # certificate (certs/pboling.pem) into every project. Inert — it is not in
+  # spec.files and cert_chain is empty — but it must not land in 40 repos.
+  - path: "certs/**"
+    strategy: keep_destination
+  # The modular gemfiles come with the CI: the generated workflows run the
+  # matrix out of gemfiles/modular, so keeping the one and not the other is a
+  # red suite. The cost is dev-only third-party forks in them
+  # (pboling/rspec_junit_formatter, pboling/rubocop-packaging).
+  # CI is the template's: no pattern here, so `.github/workflows/**` takes the
+  # default `merge`. kettle-jem's YAML merger gives the template every `uses:`
+  # line, which is how the action SHA pins stay current, and the destination
+  # every job key, so a matrix a repo has customised survives. Pushing these
+  # needs `workflow` scope (fine-grained: Workflows → Read and write) on the
+  # token, and the generated set includes gem-push.yml, which publishes to
+  # RubyGems on a tag.
+
+files:
+  # Template boilerplate carrying the template author's own project links.
+  FUNDING.md:
+    strategy: keep_destination
+  CONTRIBUTING.md:
+    strategy: keep_destination
+  # The agent instruction file is the house rules for the repo it sits in —
+  # 262 lines of mise/kettle-test instructions appended to it is wrong wherever
+  # the project does not use them.
+  AGENTS.md:
+    strategy: keep_destination
+  # Offers "contact us to discuss a custom commercial license", and links
+  # licence texts kettle-jem does not ship for every SPDX id in use here.
+  LICENSE.md:
+    strategy: keep_destination
+  # Handwritten, and the one thing a reader sees first.
+  README.md:
+    strategy: keep_destination
+  CHANGELOG.md:
+    strategy: keep_destination
+  # Wants personal given/family names per author; several of these have none.
+  CITATION.cff:
+    strategy: keep_destination
+  # House Ruby style is deliberate and sometimes carries custom cops.
+  .rubocop.yml:
+    strategy: keep_destination
+  # There is no Nix merger in the *-merge family, and these flakes carry
+  # project-specific native dependencies.
+  flake.nix:
+    strategy: keep_destination
+  # Upstream licence text where one is vendored verbatim.
+  COPYING:
+    strategy: keep_destination
+  Appraisal.root.gemfile:
+    strategy: accept_template
+  Gemfile:
+    strategy: accept_template
+  Rakefile:
+    strategy: merge
+    preference: destination
+    add_template_only_nodes: true
+  .github:
+    copilot_instructions.md:
+      strategy: accept_template
+  gemfiles:
+    modular:
+      templating.gemfile:
+        strategy: accept_template
+      templating_local.gemfile:
+        strategy: accept_template

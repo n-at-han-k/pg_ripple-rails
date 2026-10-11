@@ -2,8 +2,6 @@
 
 require "active_record"
 
-require "pg_ripple/version"
-
 # Definition first: it owns the `db/ripple` directory constant that the value
 # objects and Configuration read, and requiring it later raises NameError at
 # boot. Adapter before Configuration for the same reason — Configuration
@@ -38,6 +36,7 @@ require "pg_ripple/statements"
 require "pg_ripple/command_recorder"
 require "pg_ripple/migration_dsl"
 require "pg_ripple/schema_dumper"
+require_relative "pg_ripple/version"
 
 require "pg_ripple/railtie" if defined?(::Rails::Railtie)
 

@@ -10,3 +10,44 @@
 # Reference checkouts are working material, not repo content. Each carries its
 # own .git, so committing them would leave dangling gitlinks rather than files.
 /references/
+
+# Build Artifacts
+/tmp/*
+!/tmp/.gitignore
+*.gem
+# Bundler
+/vendor/bundle*/
+/gemfiles/*.lock
+/gemfiles/**/*.gemfile.lock
+/gemfiles/.bundle/
+/gemfiles/.bundle/config
+/gemfiles/vendor/
+Appraisal.*.gemfile.lock
+# Specs
+.rspec_status
+/coverage/
+/spec/reports/
+/results/
+.output.txt
+# Documentation
+/.yardoc/
+/_yardoc/
+/rdoc/
+# Ruby Version Managers (RVM, rbenv, etc)
+# Ignored because we currently use mise.toml
+.rvmrc
+.ruby-version
+.ruby-gemset
+.tool-versions
+# Benchmarking
+/measurement/
+# Debugger detritus
+.byebug_history
+# Local environment overrides (KEY=value, loaded by mise via dotenvy)
+.env.local
+# OS Detritus
+.DS_Store
+# Editors
+*~
+# Sentinels
+.floss_funding.*.lock
